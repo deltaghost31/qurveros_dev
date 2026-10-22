@@ -28,7 +28,8 @@ the `examples` folder in sequence:
 The package provides a streamlined flow, from the choice of the curve ansatz up
 to the extraction of the robust pulses and their simulation. The implementation 
 uses JAX to execute the required differentiation and evaluation of 
-the functions in a discrete set of points. 
+the functions in a discrete set of points. A module-by-module map of that flow
+is in [docs/code_reference.md](docs/code_reference.md). 
 
 The curve is defined as a function of the form:
 

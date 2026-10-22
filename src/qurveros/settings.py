@@ -79,37 +79,42 @@ class Settings:
 
         self.read_from_file()
         self.options.update(self.options_from_file)
-        self._DEPHASING_PROGBAR_DEPTH = 0
 
     def get_options(self):
         return self.options
 
     def __repr__(self):
 
-        for option_name, value in self.options.items():
-
-            print(f"{option_name:^20}: \t {value}")
-
-        return ''
+        lines = [
+            f"{option_name:^20}: \t {value}"
+            for option_name, value in self.options.items()
+        ]
+        return '\n'.join(lines)
 
     def read_from_file(self):
 
-        filename = self.filename
+        """
+        Loads qurveros_settings.json from the working directory or, if it
+        is missing, from a parent directory. The search stops at the first
+        file found and never walks more than NUM_TRIES directories.
+        """
 
         path = os.getcwd()
+        options_from_file = {}
 
         for _ in range(self.NUM_TRIES):
 
-            filepath = os.path.join(path, filename)
+            filepath = os.path.join(path, self.filename)
 
             try:
                 with open(filepath, 'r', encoding='utf-8') as file:
                     options_from_file = json.load(file)
             except FileNotFoundError:
-                options_from_file = {}
                 path = os.path.dirname(path)
+            else:
+                break
 
-            self.options_from_file = options_from_file
+        self.options_from_file = options_from_file
 
 
 settings = Settings()

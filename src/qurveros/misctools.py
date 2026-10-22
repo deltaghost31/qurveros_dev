@@ -1,10 +1,11 @@
 """
-This module defines generic helper functions for qurveros.
+Generic helpers that do not depend on the curve classes.
+
+Curve loading lives on BezierCurve.from_file. prepare_bezier_from_file
+remains here so existing notebooks and scripts keep working, and it
+imports the curve classes only when it is called.
 """
 
-import pandas as pd
-from qurveros.settings import settings
-from qurveros import spacecurve
 import sys
 
 
@@ -59,19 +60,8 @@ def prepare_bezier_from_file(filename, *, is_barq, n_points=None):
         barq_angle appropriately set (if applicable).
     """
 
-    if n_points is None:
-        n_points = settings.options['CURVE_POINTS']
+    # Imported here so that users of progbar_range do not load the
+    # curve, JAX differentiation, or plotting stack.
+    from qurveros.spacecurve import BezierCurve
 
-    control_points = pd.read_csv(filename).to_numpy()
-
-    if is_barq:
-        barq_angle = control_points[0, 0]
-        control_points = control_points[1:, :]
-
-    beziercurve = spacecurve.BezierCurve(control_points)
-    beziercurve.evaluate_frenet_dict(n_points)
-
-    if is_barq:
-        beziercurve.get_frenet_dict().update(barq_angle=barq_angle)
-
-    return beziercurve
+    return BezierCurve.from_file(filename, is_barq=is_barq, n_points=n_points)

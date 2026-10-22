@@ -11,7 +11,22 @@ from qurveros.settings import settings
 from qurveros.qubit_bench import simulator, noisetools
 
 
-def static_dephasing_experiment(control_dict, u_target, max_points=None):
+def _control_dict_with(control_dict, **field_updates):
+
+    """
+    Returns a shallow copy of a control dictionary with some fields replaced.
+
+    Experiments simulate the copy, so a failed run cannot leave the caller's
+    pulses permanently modified.
+    """
+
+    updated = dict(control_dict)
+    updated.update(field_updates)
+    return updated
+
+
+def static_dephasing_experiment(control_dict, u_target, max_points=None,
+                                progbar_depth=0):
 
     r"""
     Implements a static additive dephasing error experiment.
@@ -26,6 +41,9 @@ def static_dephasing_experiment(control_dict, u_target, max_points=None):
         u_target (array): The SU(2) gate.
         max_points (int): The maximum number of delta_z points
         for the simulation.
+        progbar_depth (int): Indentation level of the progress bar.
+        The simultaneous-source experiment passes 1 so its nested bar
+        lines up under the outer one.
 
     Returns:
         A dictionary with keys:
@@ -51,22 +69,22 @@ def static_dephasing_experiment(control_dict, u_target, max_points=None):
     delta_no_error = np.copy(control_dict['delta'])
     const_vector = np.ones(delta_no_error.shape)
 
-    if settings._DEPHASING_PROGBAR_DEPTH == 0:
+    if progbar_depth == 0:
         print(EXPERIMENT_TITLE.capitalize())
 
     for delta_z_idx in progbar_range(max_points,
                                      title='Static additive dephasing error',
-                                     depth=settings._DEPHASING_PROGBAR_DEPTH):
+                                     depth=progbar_depth):
 
         delta_z = delta_z_vec[delta_z_idx]
-        control_dict['delta'] = delta_no_error + delta_z*const_vector
+        noisy_dict = _control_dict_with(
+            control_dict,
+            delta=delta_no_error + delta_z*const_vector)
 
-        sim_noise_dict = simulator.simulate_control_dict(control_dict,
+        sim_noise_dict = simulator.simulate_control_dict(noisy_dict,
                                                          u_target)
 
         fidelity_results[delta_z_idx] = sim_noise_dict['avg_gate_fidelity']
-
-    control_dict['delta'] = delta_no_error
 
     sim_dict = {}
 
@@ -121,7 +139,6 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
 
     infidelity_matrix = np.zeros([max_points, max_points])
     omega_no_error = np.copy(control_dict['omega'])
-    settings._DEPHASING_PROGBAR_DEPTH = 1
 
     print(EXPERIMENT_TITLE.capitalize())
 
@@ -130,15 +147,16 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
 
         pulse_error = pulse_error_vec[pulse_idx]
 
-        control_dict['omega'] = (1 + pulse_error)*omega_no_error
+        scaled_dict = _control_dict_with(
+            control_dict,
+            omega=(1 + pulse_error)*omega_no_error)
 
-        dephasing_sim = static_dephasing_experiment(control_dict,
+        dephasing_sim = static_dephasing_experiment(scaled_dict,
                                                     u_target,
-                                                    max_points)
+                                                    max_points,
+                                                    progbar_depth=1)
 
         infidelity_matrix[:, pulse_idx] = dephasing_sim['infidelity']
-
-    control_dict['omega'] = omega_no_error
 
     sim_dict = {}
 
@@ -147,8 +165,6 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
     sim_dict['epsilon'] = pulse_error_vec
     sim_dict['tg_delta_z'] = dephasing_sim['tg_delta_z']
     sim_dict['infidelity_matrix'] = infidelity_matrix
-
-    settings._DEPHASING_PROGBAR_DEPTH = 0
 
     return sim_dict
 
@@ -242,12 +258,14 @@ def td_dephasing_experiment(control_dict, u_target, alpha, rng,
                                        depth=1):
 
             noise_vector = delta_z * noise_in[noise_run, :]
-            control_dict['delta'] = delta_no_error + noise_vector
+            noisy_dict = _control_dict_with(
+                control_dict,
+                delta=delta_no_error + noise_vector)
 
             try:
 
                 sim_noise_dict = simulator.simulate_control_dict(
-                    control_dict,
+                    noisy_dict,
                     u_target)
 
                 fidelity = sim_noise_dict['avg_gate_fidelity']
@@ -263,8 +281,6 @@ def td_dephasing_experiment(control_dict, u_target, alpha, rng,
                 fidelity = np.nan
 
             infidelity_matrix[noise_run, delta_z_idx] = 1-fidelity
-
-    control_dict['delta'] = delta_no_error
 
     sim_dict = {}
 

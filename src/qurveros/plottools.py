@@ -6,7 +6,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 import numpy as np
-from matplotlib import colors
 
 from qurveros.settings import settings
 

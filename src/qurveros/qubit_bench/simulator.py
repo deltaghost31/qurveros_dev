@@ -14,9 +14,8 @@ def simulate_control_dict(control_dict, u_target):
     Simulates the control_dict that contains the fields to
     control a single-qubit Hamiltonian of the form:
 
-    H = \frac{1}{2}(\Omega cos \Phi \sigma_x +
-        \frac{1}{2}(\Omega \sin Phi \sigma_y +
-        \frac{1}{2}(\Delta) \sigma_z
+    H = \frac{\Omega}{2}(\cos\Phi \sigma_x + \sin\Phi \sigma_y)
+        + \frac{\Delta}{2}\sigma_z
 
     Args:
         control_dict (dict): A dictionary with keys 'omega','phi','delta'.
