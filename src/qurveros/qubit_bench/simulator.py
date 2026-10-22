@@ -44,6 +44,61 @@ def simulate_control_dict(control_dict, u_target):
     return sim_dict
 
 
+def _time_and_drive(control_dict):
+
+    """
+    Time grid and drive coefficients in the normalized units of the propagator.
+
+    times[-1] is the gate duration in the dictionary. The usual control
+    dictionary already uses a grid that ends at 1, so the scale factor is 1.
+    """
+
+    times = np.asarray(control_dict['times'], dtype=float)
+    gate_time = times[-1]
+    tlist = times / gate_time
+    omega = np.asarray(control_dict['omega'], dtype=float)
+    phi = np.asarray(control_dict['phi'], dtype=float)
+    delta = np.asarray(control_dict['delta'], dtype=float)
+
+    x_control = gate_time * omega * np.cos(phi)
+    y_control = gate_time * omega * np.sin(phi)
+    z_control = gate_time * delta
+    return tlist, x_control, y_control, z_control
+
+
+def _propagate(hamiltonian_terms, tlist):
+
+    hamiltonian = qutip.QobjEvo(hamiltonian_terms, tlist=tlist)
+    return qutip.propagator(hamiltonian, t=tlist, args=None,
+                            options=settings.options['QUTIP_OPTIONS'])
+
+
+def qutrit_drive_operators(lam):
+
+    """
+    Drive operators whose {|0⟩, |1⟩} block is σ/2.
+
+    The |1⟩–|2⟩ coupling is lam times the |0⟩–|1⟩ coupling. lam = √2 for a
+    transmon. The detuning operator matches (delta/2) σ_z on the qubit
+    block and places |2⟩ at -3 delta/2, so a harmonic ladder stays harmonic
+    before the anharmonicity is added.
+    """
+
+    hx = 0.5 * qutip.Qobj(np.array([
+        [0, 1, 0],
+        [1, 0, lam],
+        [0, lam, 0],
+    ], dtype=float))
+    hy = 0.5 * qutip.Qobj(np.array([
+        [0, -1j, 0],
+        [1j, 0, -1j * lam],
+        [0, 1j * lam, 0],
+    ], dtype=complex))
+    hz_delta = qutip.Qobj(np.diag([0.5, -0.5, -1.5]))
+    hz_alpha = qutip.Qobj(np.diag([0.0, 0.0, 1.0]))
+    return hx, hy, hz_delta, hz_alpha
+
+
 def _single_qubit_sim(control_dict):
 
     """
@@ -54,24 +109,73 @@ def _single_qubit_sim(control_dict):
     is the total gate time.
     """
 
-    Tg = control_dict['times'][-1]
+    tlist, x_control, y_control, z_control = _time_and_drive(control_dict)
 
-    Hx = qutip.sigmax()/2
-    Hy = qutip.sigmay()/2
-    Hz = qutip.sigmaz()/2
+    terms = [
+        [qutip.sigmax() / 2, x_control],
+        [qutip.sigmay() / 2, y_control],
+        [qutip.sigmaz() / 2, z_control],
+    ]
+    return _propagate(terms, tlist)
 
-    omega = control_dict['omega']
-    phi = control_dict['phi']
-    delta = control_dict['delta']
 
-    x_control = Tg*omega*np.cos(phi)
-    y_control = Tg*omega*np.sin(phi)
-    z_control = Tg*delta
+def _qutrit_propagator(control_dict, tg_alpha, lam):
 
-    H_total = [[Hx, x_control], [Hy, y_control], [Hz, z_control]]
-    H_total = qutip.QobjEvo(H_total, tlist=control_dict['times']/Tg)
+    """
+    Propagator of the three-level Hamiltonian at every sample time.
+    """
 
-    result = qutip.propagator(H_total, t=control_dict['times']/Tg, args=None,
-                              options=settings.options['QUTIP_OPTIONS'])
+    tlist, x_control, y_control, z_control = _time_and_drive(control_dict)
+    gate_time = np.asarray(control_dict['times'], dtype=float)[-1]
+    alpha_control = np.full_like(tlist, gate_time * tg_alpha)
+    hx, hy, hz_delta, hz_alpha = qutrit_drive_operators(lam)
 
-    return result
+    terms = [
+        [hx, x_control],
+        [hy, y_control],
+        [hz_delta, z_control],
+        [hz_alpha, alpha_control],
+    ]
+    return _propagate(terms, tlist)
+
+
+def simulate_qutrit(control_dict, u_target, tg_alpha, lam=None):
+
+    """
+    Simulates a three-level transmon and reports leakage.
+
+    The {|0⟩, |1⟩} drive matches the qubit simulator. tg_alpha is the
+    dimensionless anharmonicity T_g α added to |2⟩.
+
+    Returns:
+        u_final: the 3x3 propagator at the end of the gate.
+        leakage, leakage_from_0, leakage_from_1: final leakage.
+        peak_leakage: the largest average leakage at any sample, including
+            population that returns to the qubit subspace before the end.
+        subspace_fidelity, subspace_infidelity: Pedersen fidelity of the
+            2x2 block against u_target.
+        subspace_phase: phase of Tr(U_target† U_block), in radians.
+    """
+
+    if lam is None:
+        lam = settings.options['DRAG_LAMBDA']
+
+    propagators = _qutrit_propagator(control_dict, tg_alpha, lam)
+    leakage_trace = np.array([
+        quantumtools.calculate_leakage(step) for step in propagators
+    ])
+    final = propagators[-1]
+    from_0, from_1, leakage = quantumtools.leakage_components(final)
+    block = quantumtools.qubit_subspace(final)
+    fidelity = quantumtools.calculate_gate_fidelity(block, u_target)
+
+    return {
+        'u_final': final.full(),
+        'leakage': leakage,
+        'leakage_from_0': from_0,
+        'leakage_from_1': from_1,
+        'peak_leakage': float(np.max(leakage_trace)),
+        'subspace_fidelity': fidelity,
+        'subspace_infidelity': 1.0 - fidelity,
+        'subspace_phase': quantumtools.subspace_phase(block, u_target),
+    }

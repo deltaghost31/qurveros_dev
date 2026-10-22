@@ -24,6 +24,7 @@ the `examples` folder in sequence:
 1. `circle_constant_pulse`
 2. `bessel_curve_robust_pulse`
 3. `circle_optimization`
+4. `drag_leakage`
 
 The package provides a streamlined flow, from the choice of the curve ansatz up
 to the extraction of the robust pulses and their simulation. The implementation 

@@ -9,6 +9,7 @@ import logging
 from qurveros.misctools import progbar_range
 from qurveros.settings import settings
 from qurveros.qubit_bench import simulator, noisetools
+from qurveros import drag
 
 
 def _control_dict_with(control_dict, **field_updates):
@@ -291,3 +292,107 @@ def td_dephasing_experiment(control_dict, u_target, alpha, rng,
     sim_dict['alpha'] = alpha
 
     return sim_dict
+
+
+def _drag_betas(betas):
+
+    if betas is None:
+        n_betas = settings.options['DRAG_BETA_POINTS']
+        return np.linspace(0.0, 2.0, n_betas)
+    return np.asarray(betas, dtype=float)
+
+
+def drag_order_experiment(control_dict, u_target, tg_alpha, *,
+                          orders=(0, 1, 2), betas=None, lam=None):
+
+    """
+    Compares DRAG orders on one pulse.
+
+    For every order and every beta, the pulse is corrected and simulated as
+    a qutrit. beta scales the theoretical DRAG terms. Order 0 ignores beta
+    and is repeated on each column so the arrays stay rectangular.
+
+    Returns:
+        orders, betas: the axes of the scan.
+        leakage, peak_leakage, subspace_infidelity, subspace_phase:
+            arrays with shape (n_orders, n_betas).
+        leakage_estimate: the same shape, from the Fourier proxy in drag.py.
+        tg_alpha, lam: the values used.
+    """
+
+    if lam is None:
+        lam = settings.options['DRAG_LAMBDA']
+
+    orders = np.asarray(tuple(orders), dtype=int)
+    betas = _drag_betas(betas)
+    shape = (len(orders), len(betas))
+
+    leakage = np.zeros(shape)
+    peak_leakage = np.zeros(shape)
+    subspace_infidelity = np.zeros(shape)
+    subspace_phase = np.zeros(shape)
+    leakage_estimate = np.zeros(shape)
+
+    print('DRAG order comparison')
+
+    for order_idx, order in enumerate(orders):
+        for beta_idx in progbar_range(len(betas), title=f'DRAG order {order}'):
+
+            beta_value = float(betas[beta_idx])
+            corrected = drag.apply_drag(control_dict, tg_alpha,
+                                        order=int(order), beta=beta_value,
+                                        lam=lam)
+            simulated = simulator.simulate_qutrit(corrected, u_target,
+                                                  tg_alpha, lam=lam)
+            leakage[order_idx, beta_idx] = simulated['leakage']
+            peak_leakage[order_idx, beta_idx] = simulated['peak_leakage']
+            subspace_infidelity[order_idx, beta_idx] = \
+                simulated['subspace_infidelity']
+            subspace_phase[order_idx, beta_idx] = simulated['subspace_phase']
+            leakage_estimate[order_idx, beta_idx] = drag.estimate_leakage(
+                corrected, tg_alpha, lam=lam)
+
+    return {
+        'experiment': 'DRAG order comparison',
+        'orders': orders,
+        'betas': betas,
+        'leakage': leakage,
+        'peak_leakage': peak_leakage,
+        'subspace_infidelity': subspace_infidelity,
+        'subspace_phase': subspace_phase,
+        'leakage_estimate': leakage_estimate,
+        'tg_alpha': tg_alpha,
+        'lam': lam,
+    }
+
+
+def drag_dephasing_comparison(control_dict, u_target, tg_alpha, *,
+                              order=1, beta=1.0, lam=None, max_points=None):
+
+    """
+    Static dephasing of a pulse before and after DRAG.
+
+    Both sweeps use the two-level simulator, so the comparison is about the
+    pulse shape rather than leakage. A very large |tg_alpha| makes the DRAG
+    correction vanish and the two infidelity curves agree.
+    """
+
+    if lam is None:
+        lam = settings.options['DRAG_LAMBDA']
+
+    corrected = drag.apply_drag(control_dict, tg_alpha, order=order,
+                                beta=beta, lam=lam)
+    bare = static_dephasing_experiment(control_dict, u_target,
+                                       max_points=max_points)
+    corrected_sweep = static_dephasing_experiment(corrected, u_target,
+                                                  max_points=max_points)
+    return {
+        'experiment': 'static dephasing before and after DRAG',
+        'tg_alpha': tg_alpha,
+        'order': order,
+        'beta': beta,
+        'lam': lam,
+        'bare_infidelity': bare['infidelity'],
+        'drag_infidelity': corrected_sweep['infidelity'],
+        'tg_delta_z': bare['tg_delta_z'],
+    }
