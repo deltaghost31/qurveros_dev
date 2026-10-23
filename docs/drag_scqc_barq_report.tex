@@ -1,0 +1,778 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\setlist[itemize]{leftmargin=1.4em,itemsep=0.25em,topsep=0.35em}
+\setlist[enumerate]{leftmargin=1.6em,itemsep=0.25em,topsep=0.35em}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\newcommand{\ket}[1]{\lvert #1\rangle}
+\newcommand{\bra}[1]{\langle #1\rvert}
+\newcommand{\braket}[2]{\langle #1\vert #2\rangle}
+\newcommand{\abs}[1]{\lvert #1\rvert}
+\newcommand{\norm}[1]{\lVert #1\rVert}
+\newcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\order}{\mathcal{O}}
+
+\title{Incorporating DRAG into Space-Curve Quantum Control\\
+and Leakage-Aware BARQ}
+\author{Technical design note for the \texttt{qurveros} package}
+\date{23 October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note derives how Derivative Removal by Adiabatic Gate (DRAG) can be
+combined with space-curve quantum control (SCQC) and the B\'ezier ansatz for
+robust quantum control (BARQ), as implemented in \texttt{qurveros}.  The
+central result is that a DRAG correction applied after a completed BARQ design
+is inexpensive, but it does not automatically preserve the exact geometric
+robustness conditions.  It preserves the computational gate only
+perturbatively in \(1/(\alpha T)\) and generally introduces mixed errors of
+order \((\delta_z T)^2/(\alpha T)^2\).  A leakage-aware BARQ objective can
+instead impose four real first-order leakage constraints while recomputing
+dephasing and amplitude sensitivities under the corrected qutrit evolution.
+The note also records the associated boundary conditions, objective functions,
+spectral and smoothness extensions, the relation to a perturbative
+\(\mathbb{C}^2\) leakage curve, and the scaling that can reasonably be
+expected before a numerical campaign.
+\end{abstract}
+
+\tableofcontents
+
+\section{Scope and conventions}
+
+SCQC and BARQ design a single-qubit gate by constructing a space curve whose
+curvature and torsion determine the drive.  Those constructions are exact for
+a two-level Hamiltonian.  A transmon, or any weakly anharmonic ladder, has at
+least one additional level.  DRAG suppresses the resulting leakage by a
+near-identity frame transformation whose generator is proportional to the
+drive~\cite{Motzoi2009}.  The two ideas therefore meet at the pulse, not
+inside the original three-dimensional Frenet frame.
+
+Throughout, \(P=\ket0\bra0+\ket1\bra1\) projects onto the computational
+subspace and \(Q=I-P\).  Time \(t\) runs from \(0\) to the gate duration \(T\).
+The dimensionless time used by \texttt{qurveros} is
+\begin{equation}
+  s=\frac{t}{T}\in[0,1].
+\end{equation}
+A dot denotes \(\dd/\dd t\) and a prime denotes \(\dd/\dd s\).
+
+The minimal physical model is a driven three-level ladder.  In the frame
+rotating at the carrier frequency, and after the rotating-wave approximation,
+\begin{equation}
+\label{eq:h3}
+\begin{aligned}
+  \frac{H_3(t)}{\hbar}
+  &= \delta(t)\ket1\bra1+(2\delta(t)+\alpha)\ket2\bra2 \\
+  &\quad+\frac12\Bigl\{\eps(t)\bigl(\ket0\bra1+\lambda\ket1\bra2\bigr)
+      +\text{h.c.}\Bigr\}.
+\end{aligned}
+\end{equation}
+The complex envelope is \(\eps(t)=\Omega_x(t)+\ii\Omega_y(t)\), \(\lambda\) is
+the ratio of the \(1\leftrightarrow2\) and \(0\leftrightarrow1\) couplings, and
+\begin{equation}
+  \alpha=\omega_{12}-\omega_{01}
+\end{equation}
+is the anharmonicity.  For a transmon one typically has \(\lambda=\sqrt2\) and
+\(\alpha<0\).  Every quadrature sign below is tied to this convention.  Taking
+the opposite complex-envelope convention, or replacing \(\alpha\) by
+\(\abs\alpha\), flips signs but not the geometric conditions.
+
+The \texttt{qurveros} control dictionary stores dimensionless fields.  With
+\(u(s)\) the complex envelope and \(d(s)\) the detuning,
+\begin{equation}
+\label{eq:normalized}
+  u(s)=T\eps(Ts),\qquad d(s)=T\delta(Ts),\qquad \nu=\alpha T,\qquad
+  \eta=\frac1{\abs\nu}.
+\end{equation}
+In the SCQC mapping, up to the package's sign conventions,
+\(\omega(s)=T\kappa(t)\) is the normalized curvature, the phase or detuning is
+fixed by the torsion, and \(T\) is the length of the curve.  DRAG is an
+asymptotic expansion in \(\eta\).  It is appropriate when the envelope and its
+phase vary slowly relative to \(\abs\alpha\), and it becomes progressively less
+reliable when \(\abs{\alpha}T\) is only a few radians.
+
+\begin{remark}[What is derived and what is a proxy]
+Sections~\ref{sec:leakage}, \ref{sec:drag}, and~\ref{sec:robust} distinguish
+three objects: an exact spectral identity for a bare envelope, a first-order
+Dyson formula for gate leakage, and the original fixed-axis DRAG
+transformation.  A complex-envelope formula for a rapidly varying SCQC phase is
+the natural extension of those results, but it remains an ansatz until it is
+checked by a qutrit Schrieffer--Wolff expansion or by direct simulation.
+\end{remark}
+
+\section{First-order leakage}
+\label{sec:leakage}
+
+Let \(U_q(t)\) be the ideal evolution generated by the computational part of
+\eqref{eq:h3}, embedded in the qutrit space, and let \(\tilde U_q(s)=U_q(Ts)\).
+Treat the \(1\leftrightarrow2\) coupling as a perturbation.  For a computational
+input \(\ket j\), the first-order amplitude to occupy \(\ket2\) at time \(T\) is
+\begin{equation}
+\label{eq:dyson}
+  A^{(1)}_{2j}(T)
+  =-\ii\frac{\lambda}{2}\int_0^T\dd t\;
+    \eps^*(t)\,e^{\ii\alpha t}\,\braket{1}{U_q(t)j}.
+\end{equation}
+Changing to normalized variables cancels one factor of \(T\):
+\begin{equation}
+  A^{(1)}_{2j}
+  =-\ii\frac{\lambda}{2}\int_0^1\dd s\;
+    u^*(s)\,e^{\ii\nu s}\,\braket{1}{\tilde U_q(s)j}.
+\end{equation}
+Averaging the resulting probability over the two computational inputs gives
+\begin{equation}
+\label{eq:leak-prob}
+  \bar L^{(1)}
+  =\frac12\sum_{j=0,1}\abs{A^{(1)}_{2j}}^2
+  =\frac{\lambda^2}{8}\sum_{j=0,1}
+    \abs{\ell_j(\nu)}^2,
+\end{equation}
+where the leakage moments are
+\begin{equation}
+\label{eq:ell}
+  \ell_j(\nu)
+  \equiv\int_0^1\dd s\;
+  u^*(s)\,e^{\ii\nu s}\,\braket{1}{\tilde U_q(s)j}.
+\end{equation}
+
+\begin{proposition}[Nominal first-order leakage closure]
+\label{prop:leakage}
+The first-order leakage amplitude vanishes for every computational input if and
+only if
+\begin{equation}
+\label{eq:leak-conditions}
+  \ell_0(\nu)=0,\qquad \ell_1(\nu)=0.
+\end{equation}
+These are two complex equations, hence four independent real constraints.
+\end{proposition}
+
+The cheaper proxy \(\int_0^1 u(s)e^{\ii\nu s}\,\dd s=0\) forces a notch in the
+bare envelope spectrum.  It is not equivalent to \eqref{eq:leak-conditions},
+because the integrands contain the evolving factor
+\(\braket{1}{\tilde U_q(s)j}\).  That factor is available from the ideal qubit
+propagator already computed by SCQC, so the stronger condition does not require
+a qutrit simulation.
+
+If a physical parameter \(q\) is uncertain, first-order insensitivity of the
+leakage cancellation adds
+\begin{equation}
+  \partial_q\ell_0(\nu)=0,\qquad \partial_q\ell_1(\nu)=0,
+\end{equation}
+another four real constraints for each such parameter.  The important choices
+are anharmonicity, a common amplitude scale, and a static detuning.
+
+\section{DRAG as a post-processor}
+\label{sec:drag}
+
+\subsection{Fixed-axis transformation}
+
+Suppose first that the intended envelope \(E_x(t)\) is real and a second
+quadrature \(E_y(t)\) is available for correction.  Following
+Motzoi~et~al.~\cite{Motzoi2009}, remove the direct leakage coupling by the
+near-identity transformation
+\begin{equation}
+\label{eq:V}
+  V(t)=\exp\left\{-\ii\frac{E_x(t)}{2\alpha}
+    \bigl(Y_{01}+\lambda Y_{12}\bigr)\right\}.
+\end{equation}
+The adiabaticity parameter is \(E_x/\alpha\).  To first order in that
+parameter, the transformed Hamiltonian contains the inertial term
+\begin{equation}
+  \frac12\left(E_y+\frac{\dot E_x}{\alpha}\right)(Y_{01}+\lambda Y_{12})
+\end{equation}
+and an ac-Stark shift of \(\ket1\) proportional to
+\begin{equation}
+  \delta-\frac{(\lambda^2-4)E_x^2}{4\alpha}.
+\end{equation}
+Thus the first-order DRAG controls are
+\begin{equation}
+\label{eq:drag-fixed}
+  E_y(t)=-\frac{\dot E_x(t)}{\alpha},
+  \qquad
+  \delta(t)=\frac{(\lambda^2-4)E_x(t)^2}{4\alpha}.
+\end{equation}
+For a transmon, \(\lambda^2=2\), so the detuning simplifies to
+\(\delta\approx -E_x^2/(2\alpha)\).  Higher-order terms in
+Ref.~\cite{Motzoi2009} correct the in-phase envelope, the derivative
+quadrature, and the detuning at orders \(E_x^3/\alpha^2\), \(E_x^2\dot
+E_x/\alpha^3\), and \(E_x^4/\alpha^3\).  They are useful once \(\eta\) is no
+longer small, but they are not required for the first-order theory.
+
+The frame transformation has no net effect on the gate precisely when
+\begin{equation}
+  V(0)=V(T)=I.
+\end{equation}
+For \eqref{eq:V}, this is the endpoint condition \(E_x(0)=E_x(T)=0\).
+
+\subsection{Complex envelope}
+
+A general SCQC pulse already uses both quadratures.  The covariant extension of
+\eqref{eq:drag-fixed} is
+\begin{equation}
+\label{eq:drag-complex}
+  \eps_D(t)=\eps(t)-\ii\frac{\beta}{\alpha}\dot\eps(t),
+\end{equation}
+with a dimensionless calibration parameter \(\beta\) equal to one in the
+analytic first-order theory.  In normalized variables,
+\begin{equation}
+\label{eq:drag-u}
+  u_D(s)=u(s)-\ii\frac{\beta}{\nu}u'(s).
+\end{equation}
+Equivalently, in Cartesian components,
+\begin{equation}
+\label{eq:drag-cartesian}
+  \omega_{x,D}=\omega_x+\frac{\beta}{\nu}\omega_y',
+  \qquad
+  \omega_{y,D}=\omega_y-\frac{\beta}{\nu}\omega_x'.
+\end{equation}
+If \(u=\omega e^{\ii\phi}\), the same correction is
+\begin{equation}
+\label{eq:drag-polar}
+  u_D(s)=e^{\ii\phi(s)}
+  \left[\omega(s)+\frac{\beta}{\nu}\omega(s)\phi'(s)
+        -\ii\frac{\beta}{\nu}\omega'(s)\right].
+\end{equation}
+The term proportional to \(\omega\phi'\) is a radial correction generated by
+phase modulation.  It is absent from textbook fixed-axis DRAG and should not
+be dropped for an SCQC pulse.  Derivatives should be taken on the Cartesian
+quadratures: near a signed-envelope zero, \(\omega\) and \(\phi\) separately
+can have spurious singularities even though \(\omega_x\) and \(\omega_y\) are
+smooth.
+
+\begin{proposition}[Bare spectral notch]
+\label{prop:notch}
+Suppose \(\eps(0)=\eps(T)=0\).  Then
+\begin{equation}
+  \int_0^T\left(\eps(t)-\ii\frac{\dot\eps(t)}{\alpha}\right)e^{\ii\alpha t}\,\dd t
+  =0.
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Integrate the derivative term by parts.  The boundary term is
+\((\eps(T)e^{\ii\alpha T}-\eps(0))/\alpha=0\), while
+\(-\ii\alpha\int\eps e^{\ii\alpha t}\,\dd t\) cancels the remaining integral of
+\(\eps e^{\ii\alpha t}\).
+\end{proof}
+
+Proposition~\ref{prop:notch} does not imply
+Proposition~\ref{prop:leakage}.  The latter weights \(\eps^*(t)\) by
+\(\braket{1}{U_q(t)j}\), and DRAG also changes \(U_q\) at order \(\eta\).
+Equation~\eqref{eq:drag-complex} should therefore be read as the appropriate
+post-processing ansatz, followed by a small calibration of \(\beta\), an
+overall amplitude, and a constant detuning.
+
+\subsection{Boundary conditions and calibration}
+
+The following conditions are listed in the order they become necessary.
+
+\begin{enumerate}
+  \item \(u(0)=u(1)=0\) makes the first-order DRAG frame an identity at both
+        endpoints.  BARQ already encourages this through its vanishing-envelope
+        construction, but a loaded or rescaled pulse should be checked.
+  \item \(u'(0)=u'(1)=0\) makes the added derivative quadrature start and end
+        continuously.
+  \item If corrections through the \(m\)th derivative are used, the derivatives
+        of orders \(0,\ldots,m\) should vanish at both endpoints.  Otherwise
+        integration by parts leaves boundary kicks in the leakage amplitude.
+  \item After constructing \(u_D\), at least the global amplitude and a
+        constant phase or detuning offset should be recalibrated.  The
+        derivative term does not cancel every Stark and higher-order coherent
+        error.
+\end{enumerate}
+
+A practical post-processing sequence is:
+
+\begin{enumerate}
+  \item Design \(u(s)\) and \(d(s)\) with ordinary BARQ and record the original
+        closure and tantrix-area diagnostics.
+  \item Apply \eqref{eq:drag-u} and the Stark correction from
+        \eqref{eq:drag-fixed}, transformed into normalized units.
+  \item On a qutrit model, tune \(\beta\), the amplitude scale, and a constant
+        detuning to minimize \(1-F_{\mathrm{avg}}\) and the leakage \(L\)
+        defined in Section~\ref{sec:metrics}.
+  \item Recompute noise generators with the corrected propagator, rather than
+        reusing the original curve tests.
+  \item Repeat under variation of \(\alpha\), gain, timing, sampling, and the
+        control-line transfer function.
+\end{enumerate}
+
+\section{Robustness after DRAG}
+\label{sec:robust}
+
+\subsection{Generator conditions}
+
+The original geometric tests are statements about a qubit propagator and a
+qubit noise operator.  Both change once the pulse is corrected and embedded in
+a qutrit.  Let \(U_D(t)\) be the ideal qutrit evolution generated by the
+corrected controls.  For a parameter \(q_a\) with Hamiltonian derivative
+\(V_a(t)=\partial H/\partial q_a\), the first Magnus generator is
+\begin{equation}
+\label{eq:generator}
+  G_a=\int_0^T\dd t\; U_D^\dagger(t)\,V_a(t)\,U_D(t).
+\end{equation}
+Its computational and leakage blocks impose different requirements.
+
+\begin{definition}[First-order qutrit robustness]
+The corrected gate is first-order robust against \(q_a\) when
+\begin{equation}
+\label{eq:robust-blocks}
+  PG_aP-\frac12\Tr(PG_aP)\,P=0,
+  \qquad QG_aP=0.
+\end{equation}
+The first equation removes the traceless logical rotation.  The second
+prevents the noise from creating leakage to first order.
+\end{definition}
+
+For a genuine qubit model one has \(P=I\), and the first equation reduces to
+the usual closure condition.  Applying the old closure or tantrix test to the
+uncorrected curve is not sufficient, because neither \(U_D\) nor \(V_a\) is the
+operator assumed by that test.
+
+\subsection{Perturbation of dephasing closure}
+
+Let \(U_0\) be the computational evolution before the DRAG correction and write
+\begin{equation}
+  U_D=U_0\exp\bigl[-\ii\eta K_1+\order(\eta^2)\bigr].
+\end{equation}
+For quasistatic detuning noise, take the interaction-picture operator
+\(n_0(t)=U_0^\dagger(t)\sigma_z U_0(t)\) and the associated error curve
+\(r_0(T)=\int_0^T n_0(t)\,\dd t\).  Expanding \eqref{eq:generator} gives
+\begin{equation}
+\label{eq:perturbed-curve}
+  r_D(T)=r_0(T)+\ii\eta\int_0^T[K_1(t),n_0(t)]\,\dd t+\order(\eta^2).
+\end{equation}
+Ordinary SCQC can enforce \(r_0(T)=0\).  It does not enforce the commutator
+integral.  Consequently, a pulse that is first-order dephasing-robust before
+post-processing generically acquires a residual generator of order
+\(\eta\).
+
+For a qubit, a vanishing first-order generator changes the leading coherent
+infidelity from quadratic to quartic in the noise strength.  After
+unconstrained post-processing the scaling is instead
+\begin{equation}
+\label{eq:scaling-robust}
+\begin{aligned}
+  \text{original closure:}\quad
+    &1-F=\order\bigl((\delta_zT)^4\bigr),\\
+  \text{post-processed DRAG:}\quad
+    &1-F=\order\bigl((\delta_zT)^2\eta^2\bigr)+\order\bigl((\delta_zT)^4\bigr).
+\end{aligned}
+\end{equation}
+The mixed term dominates the original quartic protection whenever
+\(\abs{\delta_zT}\lesssim\eta\).  This is a scaling statement, not a claim that
+the numerical coefficient is large.  Restoring the quartic regime requires the
+additional vector condition
+\begin{equation}
+\label{eq:mixed}
+  \int_0^T[K_1(t),n_0(t)]\,\dd t=0,
+\end{equation}
+or, more directly, the block conditions \eqref{eq:robust-blocks} evaluated on
+the final pulse.
+
+\subsection{Amplitude, DRAG gain, and anharmonicity}
+
+If one calibration error \(a\) multiplies both applied quadratures, its
+derivative is built from the corrected envelope,
+\begin{equation}
+  V_a(t)=\frac12\bigl(\Omega_{x,D}(t)X+\Omega_{y,D}(t)Y\bigr),
+\end{equation}
+and robustness is \(G_a\propto I\) on the computational block.  The original
+tantrix-area condition is the special case of this statement before DRAG and
+before the qutrit embedding.  If the derivative channel is calibrated
+independently, \(\beta\) must be treated as its own parameter and \(G_\beta\)
+must vanish separately.  Anharmonicity uncertainty is qualitatively different:
+it moves the leakage phase \(e^{\ii\nu s}\) and the coefficient \(1/\nu\) in
+\eqref{eq:drag-u} simultaneously.  A first-order robust design therefore
+penalizes \(\partial_\alpha M\), where \(M=PU_DP\) is the final computational
+block.
+
+Second-order cancellation follows from the next Magnus term.  For two error
+channels,
+\begin{equation}
+  G_{ab}^{(2)}=-\frac{\ii}{2}\int_0^T\dd t_1\int_0^{t_1}\dd t_2\;
+  \bigl[V_a^I(t_1),V_b^I(t_2)\bigr],
+\end{equation}
+where the superscript \(I\) denotes the interaction picture generated by
+\(U_D\).  The computational block of \(G_{ab}^{(2)}\), with its trace removed,
+is the appropriate second-order condition.  In the original qubit dephasing
+model this is the geometric zero-area constraint.
+
+\begin{table}[ht]
+\centering
+\caption{Noise channels that should be recomputed after DRAG.}
+\label{tab:channels}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Uncertainty & Generator & New risk \\
+\midrule
+Static detuning & \(\partial H/\partial\delta\) & Closure shifted at \(\order(\eta)\) \\
+Common I/Q gain & \(\partial H/\partial a\) & Derivative terms scale with the gain \\
+DRAG coefficient & \(\partial H/\partial\beta\) & Separate derivative-channel error \\
+Anharmonicity & \(\partial H/\partial\alpha\) & Notch frequency and \(1/\alpha\) both move \\
+Transfer function & filtered functional derivative & Differentiation amplifies distortion \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Leakage-aware BARQ}
+\label{sec:barq}
+
+Post-processing takes a curve designed for a qubit and changes its pulse.
+Leakage-aware BARQ instead varies the free B\'ezier points, and optionally a
+few gate-fixing parameters, under a qutrit objective.  Three nested models are
+useful.
+
+\subsection{Spectral and perturbative objectives}
+
+The least expensive differentiable objective uses
+Proposition~\ref{prop:leakage}:
+\begin{equation}
+  J_{\mathrm{spec}}=\sum_{j=0,1}\abs{\ell_j(\nu)}^2.
+\end{equation}
+The bare-envelope proxy
+\(J_{\mathrm{bare}}=\abs{\int_0^1 u(s)e^{\ii\nu s}\,\dd s}^2\) is cheaper but
+weaker.  The corresponding leakage probability from \eqref{eq:leak-prob} is
+\begin{equation}
+  J_{\mathrm{leak},1}=\frac{\lambda^2}{8}\bigl(\abs{\ell_0}^2+\abs{\ell_1}^2\bigr).
+\end{equation}
+Both can be evaluated from the normalized envelope and the ideal qubit
+propagator.  Their gradients exist once the cumulative phase and arclength are
+computed by a differentiable quadrature rather than by a black-box integrator.
+
+\subsection{Exact qutrit objective}
+\label{sec:metrics}
+
+Let \(U\) be the full qutrit propagator and \(M=PUP\) its \(2\times2\)
+computational block.  For a pure input drawn uniformly from the qubit Bloch
+sphere, the average probability of leaving that subspace is
+\begin{equation}
+\label{eq:L}
+  L=1-\frac12\Tr(M^\dagger M).
+\end{equation}
+If \(U_g\) is the target qubit unitary, the Haar-averaged state fidelity is
+\begin{equation}
+\label{eq:F}
+  F_{\mathrm{avg}}
+  =\frac{\Tr(M^\dagger M)+\abs{\Tr(U_g^\dagger M)}^2}{6}.
+\end{equation}
+Equation~\eqref{eq:F} follows from
+\begin{equation}
+  \int\abs{\bra{\psi}A\ket{\psi}}^2\,\dd\psi
+  =\frac{\abs{\Tr A}^2+\Tr(A^\dagger A)}{d(d+1)}
+\end{equation}
+with \(d=2\) and \(A=U_g^\dagger M\).  The leakage term \eqref{eq:L} is already
+present in \(F_{\mathrm{avg}}\), but retaining it separately allows leakage to
+be weighted more heavily than a coherent logical rotation.  Both quantities
+remain meaningful when \(M\) is not unitary.
+
+\subsection{What remains analytic}
+
+BARQ's point-gate-fixing construction fixes the ideal qubit operation and the
+endpoint contribution to dephasing closure before numerical optimization.  On
+a qutrit, Stark shifts and virtual transitions modify \(M\), so those
+constraints no longer guarantee the physical target exactly.  The useful hybrid
+is:
+
+\begin{itemize}
+  \item retain point-gate fixing, so the zeroth-order qubit gate and curve
+        closure remain exact;
+  \item constrain enough endpoint control points that \(u\) and \(u'\) vanish
+        at \(s=0,1\);
+  \item optimize interior points against \(F_{\mathrm{avg}}\), \(L\), and the
+        corrected generators \eqref{eq:robust-blocks};
+  \item release a global amplitude and a constant detuning during the final
+        stage, since qutrit gate fixing is no longer purely analytic;
+  \item test four- and five-level truncations for short gates, where
+        two-photon and higher-state transitions are outside \eqref{eq:h3}.
+\end{itemize}
+
+A concrete staged objective is
+\begin{equation}
+\label{eq:J}
+\begin{aligned}
+  J&=w_g(1-F_{\mathrm{avg}})+w_L L
+    +w_z\norm{PG_zP-\tfrac12\Tr(PG_zP)P}_F^2
+    +w_{zL}\norm{QG_zP}_F^2 \\
+   &\quad+w_a\norm{PG_aP-\tfrac12\Tr(PG_aP)P}_F^2
+    +w_{aL}\norm{QG_aP}_F^2
+    +w_\alpha\norm{\partial_\alpha M}_F^2 \\
+   &\quad+w_b\int_0^1\abs{u'(s)}^2\,\dd s
+    +w_{bb}\int_0^1\abs{u''(s)}^2\,\dd s
+    +w_{\max}\max_s\abs{u(s)} \\
+   &\quad+w_{\mathrm{end}}\sum_{k=0,1}\sum_{s_\star\in\{0,1\}}\abs{u^{(k)}(s_\star)}^2.
+\end{aligned}
+\end{equation}
+The weights should be introduced in stages: target and original robustness,
+then nominal leakage, then parameter uncertainty, and finally bandwidth and
+amplitude.  Turning every term on simultaneously makes the trade-off difficult
+to diagnose.
+
+\section{Further extensions}
+
+\subsection{Choosing the gate duration}
+
+For a fixed normalized BARQ waveform, the first-order leakage depends on
+duration only through \(\nu=\alpha T\).  A coherent-error search can therefore
+minimize \(L_1(\nu)=J_{\mathrm{leak},1}\) over \(T\), subject to the hardware
+bound on peak amplitude.  This is stronger than placing a zero of the bare
+spectrum at \(\alpha\), because \(\ell_j\) contains \(\tilde U_q\).  Decoherence
+selects a finite optimum of a model such as
+\begin{equation}
+  E(T)\approx L_{\mathrm{leak}}(\alpha T)+\frac{c_1T}{T_1}+\frac{c_\phi T}{T_\phi}
+  +E_{\mathrm{control}}(T).
+\end{equation}
+The coefficients \(c_1\) and \(c_\phi\) depend on how the target gate and noise
+channel average relaxation and pure dephasing; they should come from the
+open-system simulation rather than from a universal rule.
+
+\subsection{Endpoint smoothness}
+
+Let \(I(\nu)=\int_0^1 g(s)e^{\ii\nu s}\,\dd s\).  If \(g\) and its first
+\(m-1\) derivatives vanish at both endpoints, repeated integration by parts
+yields
+\begin{equation}
+  I(\nu)=\left(-\frac1{\ii\nu}\right)^m\int_0^1 g^{(m)}(s)e^{\ii\nu s}\,\dd s,
+\end{equation}
+and therefore \(\abs I=\order(\abs\nu^{-m})\).  For leakage,
+\(g(s)=u^*(s)\braket{1}{\tilde U_q(s)j}\).  Making only \(u\) smooth does not
+automatically make every derivative of this product vanish, but it improves the
+decay.  The quadratic penalties on \(u'\) and \(u''\) in \eqref{eq:J} suppress
+bandwidth even when an endpoint derivative cannot be constrained exactly.
+
+\subsection{Higher-derivative and multi-transition DRAG}
+
+A linear differential filter can place spectral zeros at several unwanted
+frequencies \(\Delta_k\):
+\begin{equation}
+\label{eq:product}
+  u_{\mathrm{corr}}(t)
+  =\prod_k\left(1-\frac{\ii}{\Delta_k}\frac{\dd}{\dd t}\right)u_0(t).
+\end{equation}
+Under the Fourier convention \(\int u(t)e^{\ii\omega t}\,\dd t\), each factor
+contributes \(1-\omega/\Delta_k\).  Expanding \eqref{eq:product} produces the
+higher-derivative DRAG family.  The same construction suppresses several
+internal or spectator transitions, provided the corresponding endpoint
+derivatives vanish and the coefficients are recalibrated on the full
+propagator.  At very short duration, direct and multiphoton transitions beyond
+\(\ket2\) can dominate the residual error, so the filter frequencies must
+include those transitions or the simulation must retain more levels.
+
+\subsection{Fourier notches and Wah-Wah modulation}
+
+The derivative expansion is not the only way to impose the linear constraints
+\(\ell_j(\nu_k)=0\).  A finite spectral ansatz
+\(u(s)=\sum_n c_n f_n(s)\) converts each notch into a linear condition on the
+coefficients \(c_n\).  Those conditions can be combined with the BARQ gate
+area, endpoint, and robustness constraints.  Wah-Wah control is the
+crowded-spectrum version of this idea: sideband modulation places a notch near
+a neighbour's leakage transition, while a DRAG quadrature suppresses the
+addressed qubit's own \(1\leftrightarrow2\)
+transition~\cite{Schutjens2013,Vesterinen2014}.  It is relevant when a
+spectator transition is closer to the drive than the addressed qubit's
+anharmonicity.
+
+\subsection{Relation to multilevel SCQC}
+
+The generalized geometric formalism represents the interaction-picture error
+operator by coordinates
+\begin{equation}
+  q_a(t)=\frac12\Tr\bigl[\Lambda_a U^\dagger(t)QU(t)\bigr],
+\end{equation}
+where \(\{\Lambda_a\}\) is a generator basis normalized by
+\(\Tr(\Lambda_a\Lambda_b)=2\delta_{ab}\)~\cite{Buterakos2021,BarnesReview}.
+Leading-order cancellation means that every coordinate curve closes,
+\(\int_0^T q_a(t)\,\dd t=0\).  A generic qutrit error gives an eight-dimensional
+curve.  Generalized curvatures can be connected recursively to the controls,
+but a transmon does not supply enough independent controls to realize an
+arbitrary curve: two quadratures and a detuning act with linked
+\(0\leftrightarrow1\) and \(1\leftrightarrow2\) matrix elements.
+
+The perturbative intermediate theory avoids that inverse problem.  Leakage
+lives in the four-real-dimensional space \(Q\mathcal H P\cong\mathbb{C}^2\),
+and the two components of its integrated coordinate are exactly
+\((\ell_0,\ell_1)\).  Closure of this leakage curve is
+Proposition~\ref{prop:leakage}.  Thus leakage-aware BARQ adds a second,
+four-dimensional closure condition without abandoning the existing
+\(\mathrm{SU}(2)\) curve used to design the computational gate.
+
+\section{Expected improvement and required evidence}
+
+For a fixed rotation angle, the drive amplitude scales as \(1/T\).  The
+dimensionless expansion parameter is therefore \(\eta\sim 1/(\abs\alpha T)\),
+up to a pulse-shape coefficient.  A generic off-resonant leakage amplitude
+begins at \(\order(\eta)\), so its probability begins at \(\order(\eta^2)\).
+First-order DRAG is constructed to cancel that amplitude.  The residual
+coherent leakage is then commonly \(\order(\eta^2)\) in amplitude and
+\(\order(\eta^4)\) in probability, before decoherence and model error are
+added.  Table~\ref{tab:scaling} gives these powers with unit prefactors.  It
+is a regime guide, not a predicted infidelity.
+
+\begin{table}[ht]
+\centering
+\caption{Unit-prefactor scaling for \(\abs\alpha/2\pi=200\,\mathrm{MHz}\).
+The entries are \(\eta^2\) and \(\eta^4\), not calculated gate errors.}
+\label{tab:scaling}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+\(T\) (ns) & \(\abs\nu=\abs\alpha T\) & \(\eta\) & \(\order(\eta^2)\) &
+\(\order(\eta^4)\) \\
+\midrule
+6.25 & 7.85 & 0.127 & \(1.62\times10^{-2}\) & \(2.63\times10^{-4}\) \\
+10 & 12.57 & 0.0796 & \(6.33\times10^{-3}\) & \(4.01\times10^{-5}\) \\
+20 & 25.13 & 0.0398 & \(1.58\times10^{-3}\) & \(2.51\times10^{-6}\) \\
+40 & 50.27 & 0.0199 & \(3.96\times10^{-4}\) & \(1.57\times10^{-7}\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Published results show that the attainable improvement depends strongly on
+duration and pulse family.  Motzoi~et~al.\ obtain reductions from roughly one
+to several orders of magnitude in simulation, depending on the
+waveform~\cite{Motzoi2009}.  Early transmon experiments demonstrated
+derivative-of-Gaussian DRAG at few-nanosecond
+duration~\cite{Chow2010}.  At \(4.16\,\mathrm{ns}\), closed-loop optimization
+around DRAG reduced leakage from \(0.29\%\) to \(0.044\%\) and raised the
+average Clifford fidelity from \(99.11\%\) to \(99.76\%\) on that
+device~\cite{Werninghaus2021}.  Analytical FAST and higher-derivative DRAG
+have subsequently reached leakage below \(3\times10^{-5}\) at
+\(6.25\,\mathrm{ns}\), about a twentyfold reduction relative to a compared
+cosine-DRAG pulse~\cite{Hyyppa2024}.  None of these values can be transferred
+directly to a BARQ waveform: its spectrum, phase excursions, anharmonicity, and
+coherence environment are different.  Experimental SCQC benchmarking also
+identifies leakage as a gate-time-dependent limitation and selects duration by
+balancing it against decoherence~\cite{SCQCExperiment2025}.
+
+A numerical claim for this package needs the comparisons in
+Table~\ref{tab:campaign}.  The minimum publication-quality comparison is a
+qutrit simulation of the original BARQ pulse, the post-processed pulse, and a
+pulse reoptimized with \eqref{eq:J}, all evaluated at the same peak amplitude
+and coherence times.
+
+\begin{table}[ht]
+\centering
+\caption{Simulation campaign needed before quoting an improvement.}
+\label{tab:campaign}
+{\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.24\linewidth}>{\raggedright\arraybackslash}p{0.30\linewidth}>{\raggedright\arraybackslash}p{0.38\linewidth}@{}}
+\toprule
+Sweep & Quantities & Purpose \\
+\midrule
+\(T\) and \(\alpha\) & \(F_{\mathrm{avg}}\), \(L\), logical error &
+  Locate leakage minima and the perturbative regime \\
+\(\beta\) and Stark coefficient & two-dimensional error surface &
+  Separate leakage cancellation from phase correction \\
+Static \(\delta_z\) and gain & infidelity heat maps &
+  Test whether robustness survives post-processing \\
+Three to five levels & convergence of \(F_{\mathrm{avg}}\) and \(L\) &
+  Detect higher-level and multiphoton leakage \\
+\(T_1,T_\phi\) & open-system process fidelity &
+  Choose a useful duration \\
+Sampling and transfer function & filtered-pulse fidelity &
+  Test sensitivity of derivative controls \\
+\(\alpha\) and gain mismatch & worst-case and average fidelity &
+  Quantify calibration robustness \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\section{Conclusion}
+
+DRAG fits SCQC as a correction in the pulse domain.  For a complex BARQ
+envelope the first-order post-processor is \eqref{eq:drag-u}, supplemented by
+a quadratic Stark detuning and by the endpoint conditions \(u=u'=0\).  This
+exactly notches the bare envelope spectrum, but it only approximately preserves
+the computational gate and the original closure condition.  The missing
+robustness requirement is \eqref{eq:robust-blocks}, evaluated with the
+corrected qutrit evolution; its first correction beyond ordinary curve closure
+is the mixed integral \eqref{eq:mixed}.
+
+Leakage-aware BARQ imposes the two complex constraints
+\(\ell_0(\alpha T)=\ell_1(\alpha T)=0\) and can include their derivatives with
+respect to uncertain parameters.  Exact qutrit propagation remains the
+acceptance test, with \(L\) and \(F_{\mathrm{avg}}\) given by \eqref{eq:L}
+and~\eqref{eq:F}.  Gate-time selection, endpoint smoothness, higher-derivative
+filters, and spectral notches are compatible extensions.  A full
+eight-dimensional \(\mathrm{SU}(3)\) construction is consistent with the
+general geometric formalism, whereas the practical and geometrically faithful
+intermediate step is closure of the perturbative leakage curve in
+\(\mathbb{C}^2\).
+
+\begin{thebibliography}{9}
+
+\bibitem{Motzoi2009}
+F.~Motzoi, J.~M.~Gambetta, P.~Rebentrost, and F.~K.~Wilhelm,
+``Simple pulses for elimination of leakage in weakly nonlinear qubits,''
+Phys.\ Rev.\ Lett.\ \textbf{103}, 110501 (2009),
+\url{https://arxiv.org/abs/0901.0534}.
+
+\bibitem{Chow2010}
+J.~M.~Chow, L.~DiCarlo, J.~M.~Gambetta, F.~Motzoi, L.~Frunzio, S.~M.~Girvin,
+and R.~J.~Schoelkopf,
+``Optimized driving of superconducting artificial atoms for improved
+single-qubit gates,''
+Phys.\ Rev.\ A \textbf{82}, 040305 (2010).
+
+\bibitem{Schutjens2013}
+R.~Schutjens, F.~Abu~Dagga, D.~J.~Egger, and F.~K.~Wilhelm,
+``Single-qubit gates in frequency-crowded transmon systems,''
+Phys.\ Rev.\ A \textbf{88}, 052330 (2013),
+\url{https://arxiv.org/abs/1306.2279}.
+
+\bibitem{Vesterinen2014}
+V.~Vesterinen, O.-P.~Saira, A.~Bruno, and L.~DiCarlo,
+``Mitigating information leakage in a crowded spectrum of weakly anharmonic
+qubits,''
+arXiv:1405.0450 (2014).
+
+\bibitem{Werninghaus2021}
+M.~Werninghaus, D.~J.~Egger, F.~Roy, S.~Machnes, F.~K.~Wilhelm, and S.~Filipp,
+``Leakage reduction in fast superconducting qubit gates via optimal control,''
+npj Quantum Inf.\ \textbf{7}, 14 (2021),
+\url{https://www.nature.com/articles/s41534-020-00346-2}.
+
+\bibitem{Buterakos2021}
+D.~Buterakos, S.~Das~Sarma, and E.~Barnes,
+``Geometrical formalism for dynamically corrected gates in multiqubit
+systems,''
+PRX Quantum \textbf{2}, 010341 (2021).
+
+\bibitem{BarnesReview}
+E.~Barnes, F.~A.~Calderon-Vargas, W.~Dong, B.~Li, J.~Zeng, and F.~Zhuang,
+``Dynamically corrected gates from geometric space curves,''
+Quantum Sci.\ Technol.\ \textbf{7}, 023001 (2022),
+\url{https://iopscience.iop.org/article/10.1088/2058-9565/ac4421}.
+
+\bibitem{Hyyppa2024}
+E.~Hyypp\"a \emph{et~al.},
+``Reducing leakage of single-qubit gates for superconducting quantum processors
+using analytical control pulse envelopes,''
+PRX Quantum \textbf{5}, 030353 (2024).
+
+\bibitem{SCQCExperiment2025}
+``Implementing and benchmarking dynamically corrected gates on superconducting
+devices using space curve quantum control,''
+arXiv:2504.09767 (2025).
+
+\end{thebibliography}
+
+\end{document}
