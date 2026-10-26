@@ -366,15 +366,49 @@ def drag_order_experiment(control_dict, u_target, tg_alpha, *,
     }
 
 
+def _qutrit_dephasing_sweep(control_dict, u_target, tg_alpha, lam, max_points):
+
+    """
+    Static dephasing of one pulse on the three-level simulator.
+
+    Infidelity is the subspace infidelity of the 2x2 block, so leakage and
+    the Stark-shifted qubit rotation both contribute.
+    """
+
+    if max_points is None:
+        max_points = settings.options['MAX_POINTS']
+
+    gate_time = np.asarray(control_dict['times'], dtype=float)[-1]
+    delta_z_vec = np.logspace(*settings.options['DELTA_Z_INTERVAL'],
+                              max_points) / gate_time
+    delta_no_error = np.asarray(control_dict['delta'], dtype=float)
+    infidelity = np.zeros(max_points)
+    leakage = np.zeros(max_points)
+
+    for index, delta_z in enumerate(delta_z_vec):
+        noisy = _control_dict_with(
+            control_dict,
+            delta=delta_no_error + delta_z)
+        simulated = simulator.simulate_qutrit(noisy, u_target, tg_alpha,
+                                              lam=lam)
+        infidelity[index] = simulated['subspace_infidelity']
+        leakage[index] = simulated['leakage']
+
+    return gate_time * delta_z_vec, infidelity, leakage
+
+
 def drag_dephasing_comparison(control_dict, u_target, tg_alpha, *,
                               order=1, beta=1.0, lam=None, max_points=None):
 
     """
-    Static dephasing of a pulse before and after DRAG.
+    Static dephasing of a pulse before and after DRAG, on the qutrit.
 
-    Both sweeps use the two-level simulator, so the comparison is about the
-    pulse shape rather than leakage. A very large |tg_alpha| makes the DRAG
-    correction vanish and the two infidelity curves agree.
+    Both sweeps use simulate_qutrit. The subspace infidelity therefore
+    includes leakage and the detuning correction, which a two-level sweep
+    of the same pulses cannot see. A large |tg_alpha| makes the DRAG
+    correction small, so the two infidelity curves approach each other.
+    Very large |tg_alpha| also makes the qutrit diagonal stiff; keep the
+    value inside the range the ODE solver can integrate.
     """
 
     if lam is None:
@@ -382,17 +416,19 @@ def drag_dephasing_comparison(control_dict, u_target, tg_alpha, *,
 
     corrected = drag.apply_drag(control_dict, tg_alpha, order=order,
                                 beta=beta, lam=lam)
-    bare = static_dephasing_experiment(control_dict, u_target,
-                                       max_points=max_points)
-    corrected_sweep = static_dephasing_experiment(corrected, u_target,
-                                                  max_points=max_points)
+    tg_delta_z, bare_infidelity, bare_leakage = _qutrit_dephasing_sweep(
+        control_dict, u_target, tg_alpha, lam, max_points)
+    _, drag_infidelity, drag_leakage = _qutrit_dephasing_sweep(
+        corrected, u_target, tg_alpha, lam, max_points)
     return {
-        'experiment': 'static dephasing before and after DRAG',
+        'experiment': 'qutrit static dephasing before and after DRAG',
         'tg_alpha': tg_alpha,
         'order': order,
         'beta': beta,
         'lam': lam,
-        'bare_infidelity': bare['infidelity'],
-        'drag_infidelity': corrected_sweep['infidelity'],
-        'tg_delta_z': bare['tg_delta_z'],
+        'bare_infidelity': bare_infidelity,
+        'drag_infidelity': drag_infidelity,
+        'bare_leakage': bare_leakage,
+        'drag_leakage': drag_leakage,
+        'tg_delta_z': tg_delta_z,
     }
