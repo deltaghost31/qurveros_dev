@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import functools
 
 from qurveros.settings import settings
-from qurveros import controltools, frametools, beziertools, plottools
+from qurveros import controltools, frametools, beziertools
 
 
 class SpaceCurve:
@@ -86,25 +86,30 @@ class SpaceCurve:
         self.params = params
         self.control_dict = None
         self.robustness_props = None
+        # order > 0 means the user supplied a tangent, so the position
+        # vector is recovered by integrating it after the frame is known.
+        self._reconstruct_position = order > 0
 
-        # Ensure correct types for frenet_dict calculations.
+        wrapped_curve = None
         if curve is not None:
-            def curve_fun(x, params):
+            def wrapped_curve(x, params):
                 return 1.0*jnp.array(curve(x, params)).flatten()
 
+        if curve is None and deriv_array_fun is None:
+            raise RuntimeError('Either a curve or a deriv_array function '
+                               'must be provided.')
+
+        if curve is None and order == 0:
+            raise RuntimeError('The position vector is not defined.')
+
         if deriv_array_fun is None:
-            if curve is None:
-                raise RuntimeError('Either a curve or a deriv_array function '
-                                   'must be provided.')
-
-            deriv_array_fun = frametools.make_deriv_array_fun(curve_fun,
+            deriv_array_fun = frametools.make_deriv_array_fun(wrapped_curve,
                                                               order)
-        else:
-            if curve is None and order == 0:
-                raise RuntimeError('The position vector is not defined.')
 
-        if order > 0:
-            def curve_fun(x, params):
+        if order == 0:
+            position_fun = wrapped_curve
+        else:
+            def position_fun(x, params):
                 return 0.
 
         @jax.jit
@@ -118,7 +123,7 @@ class SpaceCurve:
             frenet_dict['x_values'] = x
             frenet_dict['params'] = params
 
-            frenet_dict['curve'] = curve_fun(x, params)
+            frenet_dict['curve'] = position_fun(x, params)
 
             return frenet_dict
 
@@ -166,7 +171,7 @@ class SpaceCurve:
 
         frenet_dict = self._frenet_dict_fun(x_values, self.params)
 
-        if len(frenet_dict['curve'].shape) < 2:
+        if self._reconstruct_position:
 
             print('The curve will be constructed using the tangent vector.')
             curve = frametools.calculate_curve_from_tantrix(frenet_dict)
@@ -207,8 +212,8 @@ class SpaceCurve:
              is not initialized.
         """
 
-        if self.frenet_dict is None:
-            raise AttributeError('Have you initialized the frenet dict?')
+        self._require('frenet_dict',
+                      'Have you initialized the frenet dict?')
 
         robustness_props = RobustnessProperties(self.frenet_dict)
 
@@ -216,13 +221,13 @@ class SpaceCurve:
 
     def get_robustness_properties(self):
 
-        if self.robustness_props is None:
-            raise AttributeError(
-                'Have you evaluated the robustness properties?')
+        self._require('robustness_props',
+                      'Have you evaluated the robustness properties?')
 
         return self.robustness_props
 
-    def evaluate_control_dict(self, control_mode, n_points=None):
+    def evaluate_control_dict(self, control_mode, n_points=None, *,
+                              ttc_angle=None):
 
         """
         Sets the control_dict attribute. The control dictionary contains
@@ -236,6 +241,10 @@ class SpaceCurve:
             n_points (int): The number of points where the control dictionary
             is evaluated at the given interval. The default value is drawn
             from the settings.options['SIM_POINTS'].
+            ttc_angle (float): Binormal angle forwarded to the TTC control
+            modes. BarqCurve supplies this from its gate-fixing parameters.
+            Other curves leave it empty and the angle is read from the
+            frenet dictionary.
 
         Raises:
              AttributeError: An exception is raised when the frenet dictionary
@@ -248,8 +257,8 @@ class SpaceCurve:
             the fields' details.
         """
 
-        if self.frenet_dict is None:
-            raise AttributeError('Have you initialized the frenet dict?')
+        self._require('frenet_dict',
+                      'Have you initialized the frenet dict?')
 
         if n_points is None:
             n_points = settings.options['SIM_POINTS']
@@ -257,7 +266,8 @@ class SpaceCurve:
         self.control_dict = controltools.calculate_control_dict(
             self.frenet_dict,
             control_mode,
-            n_points=n_points)
+            n_points=n_points,
+            ttc_angle=ttc_angle)
 
     def get_control_dict(self):
 
@@ -281,8 +291,8 @@ class SpaceCurve:
         """
         Plots the position vector of the curve.
         """
-        if self.frenet_dict is None:
-            raise AttributeError('Have you initialized the frenet dict?')
+        self._require('frenet_dict',
+                      'Have you initialized the frenet dict?')
 
         self._plot_vector(self.frenet_dict['curve'])
 
@@ -291,12 +301,14 @@ class SpaceCurve:
         """
         Plots the (normalized) tangent vector of the curve.
         """
-        if self.frenet_dict is None:
-            raise AttributeError('Have you initialized the frenet dict?')
+        self._require('frenet_dict',
+                      'Have you initialized the frenet dict?')
 
         self._plot_vector(self.frenet_dict['frame'][:, 0, :])
 
     def _plot_vector(self, vector):
+
+        from qurveros import plottools
 
         Tg = self.frenet_dict['length'][-1]
 
@@ -311,8 +323,10 @@ class SpaceCurve:
             AttributeError: An exception is raised when a control dictionary
             is not set.
         """
-        if self.control_dict is None:
-            raise AttributeError('Have you chosen a control mode first?')
+        self._require('control_dict',
+                      'Have you chosen a control mode first?')
+
+        from qurveros import plottools
 
         plottools.plot_fields(self.control_dict, plot_mode)
 
@@ -323,10 +337,20 @@ class SpaceCurve:
         the controltools.py module.
         """
 
-        if self.control_dict is None:
-            raise AttributeError('Have you chosen a control mode first?')
+        self._require('control_dict',
+                      'Have you chosen a control mode first?')
 
         controltools.save_control_dict(self.control_dict, filename)
+
+    def _require(self, attr_name, message):
+
+        """
+        Raises AttributeError with the historical message when a pipeline
+        step is used before the data it needs has been calculated.
+        """
+
+        if getattr(self, attr_name) is None:
+            raise AttributeError(message)
 
 
 class BezierCurve(SpaceCurve):
@@ -346,34 +370,65 @@ class BezierCurve(SpaceCurve):
         Receives the control points for the construction of the Bezier curve.
 
         Args:
-            points (array): A 3 x M array of control points.
+            points (array): An M x 3 array of control points.
 
         Raises:
             ValueError: If the number of control points provided is not
             sufficient.
         """
 
-        # Without the pre-calculation of the derivatives, we could use:
-        # super().__init__(curve=beziertools.bezier_curve_vec,
-        #                  order=0,
-        #                  interval=[0, 1],
-        #                  params=points)
-
         if points.shape[0] <= settings.options['NUM_DERIVS']:
             raise ValueError('More control points are required.'
                              ' Check NUM_DERIVS value')
 
+        # Finite differences of the control points replace automatic
+        # differentiation. That needs enough points that the differences
+        # do not become an empty array, which is the check above.
         bezier_deriv_array_fun = beziertools.make_bezier_deriv_array_fun()
-
-        # The current implementation of the bezier curve derivatives assumes
-        # a sufficient number of points so that the finite differences do not
-        # return an empty array.
 
         super().__init__(curve=beziertools.bezier_curve_vec,
                          order=0,
                          interval=[0, 1],
                          params=points,
                          deriv_array_fun=bezier_deriv_array_fun)
+
+    @classmethod
+    def from_file(cls, filename, *, is_barq, n_points=None):
+
+        """
+        Creates a BezierCurve from a csv file of control points.
+
+        Args:
+            filename (str): The file where the data is stored.
+            is_barq (bool): If the control points come from a BarqCurve,
+                the first row stores the binormal angle used by TTC.
+            n_points (int): The number of points used to sample the curve.
+                The default is settings.options['CURVE_POINTS'].
+
+        Returns:
+            A BezierCurve with the frenet dictionary already evaluated.
+            When is_barq is true, that dictionary also contains barq_angle.
+        """
+
+        import pandas as pd
+
+        if n_points is None:
+            n_points = settings.options['CURVE_POINTS']
+
+        control_points = pd.read_csv(filename).to_numpy()
+
+        barq_angle = None
+        if is_barq:
+            barq_angle = control_points[0, 0]
+            control_points = control_points[1:, :]
+
+        beziercurve = cls(control_points)
+        beziercurve.evaluate_frenet_dict(n_points)
+
+        if is_barq:
+            beziercurve.get_frenet_dict().update(barq_angle=barq_angle)
+
+        return beziercurve
 
 
 class RobustnessProperties:
@@ -392,6 +447,8 @@ class RobustnessProperties:
 
     def __repr__(self):
 
+        lines = []
+
         for rob_test, value in self.robustness_dict.items():
 
             print_val = value**2
@@ -399,9 +456,9 @@ class RobustnessProperties:
             if rob_test == 'CFI':
                 print_val = value
 
-            print(f"|{rob_test:^25}: \t {jnp.sum(print_val):.4e}")
+            lines.append(f"|{rob_test:^25}: \t {jnp.sum(print_val):.4e}")
 
-        return ''
+        return '\n'.join(lines)
 
     def calculate_properties(self):
 

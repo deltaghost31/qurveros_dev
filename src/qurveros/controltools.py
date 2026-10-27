@@ -10,16 +10,16 @@ from qurveros import frametools
 from qurveros.settings import settings
 
 
-def calculate_control_dict(frenet_dict, control_mode, n_points):
+def calculate_control_dict(frenet_dict, control_mode, n_points, *,
+                           ttc_angle=None):
 
     r"""
     Calculates the control dictionary for the quantum evolution.
 
     The control Hamiltonian is of the form:
 
-    H = \frac{1}{2}(\Omega cos \Phi \sigma_x +
-        \frac{1}{2}(\Omega \sin Phi \sigma_y +
-        \frac{1}{2}(\Delta) \sigma_z
+    H = \frac{\Omega}{2}(\cos\Phi \sigma_x + \sin\Phi \sigma_y)
+        + \frac{\Delta}{2}\sigma_z
 
     The quantum evolution is rescaled to the unitless time t' = t/T_g where
     T_g is the gate time found as the total length of the curve.
@@ -52,6 +52,9 @@ def calculate_control_dict(frenet_dict, control_mode, n_points):
 
         n_points (int): The number of samples for the elements of the
                         control dictionary.
+        ttc_angle (float): Binormal angle used by the TTC control modes.
+                        When omitted, the angle is read from the curve
+                        parameters or from frenet_dict['barq_angle'].
 
     Returns:
         control_dict (dict): The control dictionary with keys:
@@ -91,9 +94,13 @@ def calculate_control_dict(frenet_dict, control_mode, n_points):
 
     sign_tracker = np.cumsum(sign_tracker_deriv)
 
-    # Fields and time
+    # Fields and time. The arclength is already stored on the frenet
+    # dictionary by SpaceCurve.evaluate_frenet_dict.
 
-    times = frametools.calculate_cumulative_length(frenet_dict)
+    if 'length' in frenet_dict:
+        times = np.array(frenet_dict['length'])
+    else:
+        times = frametools.calculate_cumulative_length(frenet_dict)
 
     Tg = times[-1]
     times = times/Tg
@@ -117,16 +124,11 @@ def calculate_control_dict(frenet_dict, control_mode, n_points):
 
         # See barqtools for details.
 
-        if 'pgf_params' in frenet_dict['params']:
-            barq_angle = frenet_dict['params']['pgf_params']['barq_angle'][0]
-        elif 'barq_angle' in frenet_dict:
-            barq_angle = frenet_dict['barq_angle']
-        else:
-            raise ValueError('TTC requires a barq angle to calculate'
-                             ' the detuning value.')
+        if ttc_angle is None:
+            ttc_angle = _ttc_angle_from_frenet_dict(frenet_dict)
 
         delta_value = frametools.calculate_ttc_detuning(frenet_dict,
-                                                        barq_angle)
+                                                        ttc_angle)
         delta = delta_value*np.ones_like(omega)
 
         phi = phi + delta*times
@@ -162,6 +164,28 @@ def calculate_control_dict(frenet_dict, control_mode, n_points):
     control_dict = interpolate_control_dict(control_dict, n_points)
 
     return control_dict
+
+
+def _ttc_angle_from_frenet_dict(frenet_dict):
+
+    """
+    Reads the binormal angle stored either on BARQ parameters or, for a
+    curve reloaded from control points, directly on the frenet dictionary.
+
+    The BARQ parameters are repeated once per sample by vmap, so the
+    angle array is indexed at its first entry.
+    """
+
+    params = frenet_dict['params']
+
+    if isinstance(params, dict) and 'pgf_params' in params:
+        return params['pgf_params']['barq_angle'][0]
+
+    if 'barq_angle' in frenet_dict:
+        return frenet_dict['barq_angle']
+
+    raise ValueError('TTC requires a barq angle to calculate'
+                     ' the detuning value.')
 
 
 def interpolate_control_dict(control_dict, n_points):
@@ -219,6 +243,53 @@ def load_control_dict(filename):
         loaded_dict[field] = np.array(loaded_dict[field])
 
     return loaded_dict
+
+
+def concatenate_control_dicts(*control_dicts):
+
+    """
+    Places pulses back to back in a single control dictionary.
+
+    Each pulse keeps its own fields, including its phase starting from its
+    own initial value, so the sequence implements the product of the
+    individual gates (the last pulse acts last). The time grid of each pulse
+    is shifted to start where the previous one ended, and the duplicated
+    junction sample is dropped.
+
+    The simulators normalize by times[-1], so a sequence of two unit-length
+    pulses keeps tg_alpha as T_g α of a single pulse, while the static
+    dephasing experiments report tg_delta_z for the total duration.
+
+    Returns:
+        A dictionary with times and the fields in FIELD_NAMES, and
+        pulse_boundaries: the end time of each pulse.
+    """
+
+    if not control_dicts:
+        raise ValueError('At least one control dictionary is required.')
+
+    field_names = settings.options['FIELD_NAMES']
+    times_parts = []
+    field_parts = {field: [] for field in field_names}
+    boundaries = []
+    offset = 0.0
+
+    for index, control_dict in enumerate(control_dicts):
+        times = np.asarray(control_dict['times'], dtype=float)
+        times = times - times[0]
+        start = 0 if index == 0 else 1
+        times_parts.append(offset + times[start:])
+        for field in field_names:
+            values = np.asarray(control_dict[field], dtype=float)
+            field_parts[field].append(values[start:])
+        offset += times[-1]
+        boundaries.append(offset)
+
+    concatenated = {'times': np.concatenate(times_parts)}
+    for field in field_names:
+        concatenated[field] = np.concatenate(field_parts[field])
+    concatenated['pulse_boundaries'] = np.array(boundaries)
+    return concatenated
 
 
 def make_dummy_dict(n_points):

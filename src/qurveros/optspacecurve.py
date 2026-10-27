@@ -323,20 +323,28 @@ class BarqCurve(OptimizableSpaceCurve):
         params['pgf_params'] = init_pgf_params
         params['prs_params'] = init_prs_params
 
-        return super().initialize_parameters(params)
+        super().initialize_parameters(params)
 
-    def evaluate_control_dict(self, n_points=None):
+    def evaluate_control_dict(self, control_mode='TTC', n_points=None):
 
         """
-        Evaluates the control dictionary using the TTC choice.
+        Evaluates the control dictionary. The default mode is TTC, which is
+        the control choice built into BARQ. The binormal angle is passed
+        through explicitly so the pulse code does not inspect BARQ parameters.
         """
 
-        # If the pgf_mod fixes some parameters, they will not be automatically
-        # updated upon execution. The corner case is when the barq_angle
-        # is fixed, and the TTC used. That case must be handled with an
-        # additional update or by masking the respective gradient update.
+        # If pgf_mod replaces barq_angle during the gate-fixing map, the
+        # value stored on self.params is the one used here. Mask that
+        # parameter's gradient, or copy the modified angle back, when a
+        # fixed angle must also drive the TTC detuning.
 
-        super().evaluate_control_dict('TTC', n_points)
+        ttc_angle = None
+        if self.params is not None and 'pgf_params' in self.params:
+            ttc_angle = self.params['pgf_params']['barq_angle']
+
+        super().evaluate_control_dict(control_mode,
+                                      n_points,
+                                      ttc_angle=ttc_angle)
 
     def get_bezier_control_points(self):
 
