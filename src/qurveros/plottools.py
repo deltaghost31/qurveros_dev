@@ -156,7 +156,8 @@ def plot_fields(control_dict, plot_mode='full', axs=None):
     return axs
 
 
-def plot_noise_contour(sim_dict, levels=None, ax=None):
+def plot_noise_contour(sim_dict, levels=None, ax=None,
+                       key='infidelity_matrix'):
 
     """
     Plots the noise contour diagrams for multiplicative static driving error
@@ -168,6 +169,8 @@ def plot_noise_contour(sim_dict, levels=None, ax=None):
         levels (list): A list containing the levels to be used for the
         countour plot.
         ax (matplotlib.axes.Axes): An axes object to plot the contour.
+        key (str): The matrix to draw. 'leakage_matrix' draws the leakage
+        of a qutrit experiment on the same axes.
 
     Returns:
         A QuadContourSet object.
@@ -186,20 +189,23 @@ def plot_noise_contour(sim_dict, levels=None, ax=None):
 
     epsilon_log = np.log10(sim_dict['epsilon'])
     tg_delta_z_log = np.log10(sim_dict['tg_delta_z'])
-    infidelity_log_matrix = np.emath.log10(sim_dict['infidelity_matrix']).real
+    log_matrix = np.emath.log10(sim_dict[key]).real
 
     contour_set = ax.contourf(epsilon_log,
                               tg_delta_z_log,
-                              infidelity_log_matrix,
+                              log_matrix,
                               cmap=cmap, levels=levels, extend='both')
 
     ax.set_xlabel(r'Pulse error $[\text{log}_{10}(\varepsilon)]$')
     ax.set_ylabel(r'Dephasing error $[\text{log}_{10}(T_g\delta_z)]$')
 
     if fig is not None:
+        if key == 'leakage_matrix':
+            label = r'Leakage  $[\text{log}_{10}(L)]$'
+        else:
+            label = r'Infidelity  $[\text{log}_{10}(\mathcal{I})]$'
         cb = fig.colorbar(contour_set, location='top', ax=ax, pad=0.0)
-        cb.set_label(r'Infidelity  $[\text{log}_{10}(\mathcal{I})]$',
-                     labelpad=matplotlib.rcParams['xtick.major.pad'])
+        cb.set_label(label, labelpad=matplotlib.rcParams['xtick.major.pad'])
 
         ax.locator_params(axis='y', nbins=7)
         ax.locator_params(axis='x', nbins=7)

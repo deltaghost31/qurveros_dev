@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import qutip
 
-from qurveros import drag, plottools
+from qurveros import controltools, drag, plottools
 from qurveros.qubit_bench import noise_experiments, quantumtools, simulator
 from qurveros.spacecurve import SpaceCurve
 
@@ -21,10 +21,10 @@ TG_ALPHA = -20.0
 N_POINTS = 300
 
 
-def bessel_control(n_curve=2048, n_sim=400):
+def bessel_curve(n_curve=2048):
 
     """
-    The robust Bessel pulse used by the curve tests, on a shorter grid.
+    The robust Bessel curve used by the curve tests.
     """
 
     def curve(x, params):
@@ -39,6 +39,16 @@ def bessel_control(n_curve=2048, n_sim=400):
     spacecurve = SpaceCurve(curve=curve, order=1, interval=[0, 2 * jnp.pi],
                             params=[5.5201, 0.5660])
     spacecurve.evaluate_frenet_dict(n_points=n_curve)
+    return spacecurve
+
+
+def bessel_control(n_curve=2048, n_sim=400):
+
+    """
+    The robust Bessel pulse used by the curve tests, on a shorter grid.
+    """
+
+    spacecurve = bessel_curve(n_curve)
     spacecurve.evaluate_control_dict('XY', n_points=n_sim)
     return spacecurve.get_control_dict()
 
@@ -210,6 +220,84 @@ class DragExperimentTestCase(unittest.TestCase):
             corrected, corrected_gate, max_points=4)
         # A plain pi pulse at the same detuning is orders of magnitude worse.
         self.assertLess(sweep['infidelity'][-1], 1e-5)
+
+
+class FirstOrderTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.pulse = drag.gaussian_pi_control(n_points=N_POINTS, sigma=0.12)
+        self.target = qutip.sigmax()
+
+    def test_error_vectors_predict_small_noise_infidelity(self):
+        vectors = simulator.first_order_error_vectors(self.pulse)
+        delta_z = 1e-3
+        dephased = simulator.simulate_control_dict(
+            dict(self.pulse, delta=self.pulse['delta'] + delta_z),
+            self.target)
+        self.assertTrue(np.isclose(1 - dephased['avg_gate_fidelity'],
+                                   delta_z ** 2 * vectors['r_z_norm'] ** 2 / 6,
+                                   rtol=1e-2))
+        epsilon = 1e-3
+        scaled = simulator.simulate_control_dict(
+            dict(self.pulse, omega=self.pulse['omega'] * (1 + epsilon)),
+            self.target)
+        self.assertTrue(np.isclose(
+            1 - scaled['avg_gate_fidelity'],
+            epsilon ** 2 * vectors['r_epsilon_norm'] ** 2 / 6,
+            rtol=1e-2))
+        self.assertEqual(vectors['r_z_trace'].shape, (N_POINTS, 3))
+
+    def test_error_vectors_match_curve_geometry(self):
+        spacecurve = bessel_curve()
+        spacecurve.evaluate_robustness_properties()
+        robustness = \
+            spacecurve.get_robustness_properties().get_robustness_dict()
+        spacecurve.evaluate_control_dict('XY', n_points=400)
+        vectors = simulator.first_order_error_vectors(
+            spacecurve.get_control_dict())
+        self.assertTrue(np.isclose(
+            vectors['r_z_norm'],
+            np.linalg.norm(robustness['closed_test']), rtol=1e-2))
+        self.assertLess(vectors['r_z_norm'], 2e-3)
+
+    def test_first_order_leakage_matches_qutrit(self):
+        tg_alpha = -100.0
+        predicted = drag.first_order_leakage(self.pulse, tg_alpha)
+        simulated = simulator.simulate_qutrit(self.pulse, self.target,
+                                              tg_alpha)
+        self.assertTrue(np.isclose(predicted['leakage'],
+                                   simulated['leakage'], rtol=5e-2))
+        self.assertTrue(np.isclose(predicted['leakage_trace'].max(),
+                                   simulated['peak_leakage'], rtol=5e-2))
+        self.assertEqual(predicted['leakage_trace'].shape,
+                         simulated['leakage_trace'].shape)
+
+    def test_two_pi_pulses_give_identity(self):
+        sequence = controltools.concatenate_control_dicts(self.pulse,
+                                                          self.pulse)
+        self.assertEqual(len(sequence['times']), 2 * N_POINTS - 1)
+        self.assertTrue(np.allclose(sequence['pulse_boundaries'], [1.0, 2.0]))
+        fidelity = simulator.simulate_control_dict(
+            sequence, qutip.qeye(2))['avg_gate_fidelity']
+        self.assertGreater(fidelity, 1 - 1e-8)
+        qutrit = simulator.simulate_qutrit(sequence, qutip.qeye(2), -1000.0)
+        self.assertGreater(qutrit['subspace_fidelity'], 1 - 1e-4)
+
+    def test_qutrit_noise_grid_matches_qubit_at_large_alpha(self):
+        pulse = drag.gaussian_pi_control(n_points=80, sigma=0.15)
+        qubit = noise_experiments.simult_source_experiment(
+            pulse, self.target, max_points=2)
+        qutrit = noise_experiments.simult_source_experiment(
+            pulse, self.target, max_points=2, tg_alpha=-1000.0)
+        self.assertNotIn('leakage_matrix', qubit)
+        self.assertEqual(qutrit['leakage_matrix'].shape, (2, 2))
+        # What remains is the 1/tg_alpha Stark shift of |1⟩.
+        self.assertTrue(np.allclose(qutrit['infidelity_matrix'],
+                                    qubit['infidelity_matrix'],
+                                    rtol=5e-2, atol=1e-5))
+        plottools.plot_noise_contour(qutrit, key='leakage_matrix',
+                                     levels=(-12, -9, -6))
+        plt.close('all')
 
 
 class LeakageHelperTestCase(unittest.TestCase):
