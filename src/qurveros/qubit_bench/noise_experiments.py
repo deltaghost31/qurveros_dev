@@ -27,7 +27,7 @@ def _control_dict_with(control_dict, **field_updates):
 
 
 def static_dephasing_experiment(control_dict, u_target, max_points=None,
-                                progbar_depth=0):
+                                progbar_depth=0, *, tg_alpha=None, lam=None):
 
     r"""
     Implements a static additive dephasing error experiment.
@@ -45,6 +45,11 @@ def static_dephasing_experiment(control_dict, u_target, max_points=None,
         progbar_depth (int): Indentation level of the progress bar.
         The simultaneous-source experiment passes 1 so its nested bar
         lines up under the outer one.
+        tg_alpha (float): When given, every point is simulated as a qutrit
+        with this T_g α (see simulator.simulate_qutrit). The noise is added
+        to delta, which shifts the qutrit levels as (1/2, -1/2, -3/2): the
+        frequency noise of a ladder system up to a global phase.
+        lam (float): The |1⟩–|2⟩ coupling ratio for the qutrit.
 
     Returns:
         A dictionary with keys:
@@ -52,11 +57,14 @@ def static_dephasing_experiment(control_dict, u_target, max_points=None,
         experiment (str): The description of the experiment.
         tg_delta_z (array): An array for the values of the error in
         dimensionless units.
-        infidelity (array): An array for the gate infidelity.
+        infidelity (array): An array for the gate infidelity. For a qutrit
+        this is the subspace infidelity, which includes leakage.
+        leakage (array): Final leakage, only for a qutrit.
         }
     """
 
     EXPERIMENT_TITLE = 'static additive dephasing experiment'
+    qutrit = tg_alpha is not None
 
     if max_points is None:
         max_points = settings.options['MAX_POINTS']
@@ -66,6 +74,7 @@ def static_dephasing_experiment(control_dict, u_target, max_points=None,
                               max_points)/Tg
 
     fidelity_results = np.zeros(delta_z_vec.shape)
+    leakage_results = np.zeros(delta_z_vec.shape)
 
     delta_no_error = np.copy(control_dict['delta'])
     const_vector = np.ones(delta_no_error.shape)
@@ -82,10 +91,17 @@ def static_dephasing_experiment(control_dict, u_target, max_points=None,
             control_dict,
             delta=delta_no_error + delta_z*const_vector)
 
-        sim_noise_dict = simulator.simulate_control_dict(noisy_dict,
-                                                         u_target)
-
-        fidelity_results[delta_z_idx] = sim_noise_dict['avg_gate_fidelity']
+        if qutrit:
+            sim_noise_dict = simulator.simulate_qutrit(noisy_dict, u_target,
+                                                       tg_alpha, lam=lam)
+            fidelity_results[delta_z_idx] = \
+                sim_noise_dict['subspace_fidelity']
+            leakage_results[delta_z_idx] = sim_noise_dict['leakage']
+        else:
+            sim_noise_dict = simulator.simulate_control_dict(noisy_dict,
+                                                             u_target)
+            fidelity_results[delta_z_idx] = \
+                sim_noise_dict['avg_gate_fidelity']
 
     sim_dict = {}
 
@@ -94,10 +110,15 @@ def static_dephasing_experiment(control_dict, u_target, max_points=None,
     sim_dict['infidelity'] = 1 - fidelity_results
     sim_dict['tg_delta_z'] = Tg*delta_z_vec
 
+    if qutrit:
+        sim_dict['leakage'] = leakage_results
+        sim_dict['tg_alpha'] = tg_alpha
+
     return sim_dict
 
 
-def simult_source_experiment(control_dict, u_target, max_points=None):
+def simult_source_experiment(control_dict, u_target, max_points=None, *,
+                             tg_alpha=None, lam=None):
 
     r"""
     Implements a simultaneous error source experiment with
@@ -114,6 +135,9 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
         u_target (array): The SU(2) gate.
         max_points (int): The maximum number of delta_z points
         for the simulation.
+        tg_alpha (float): When given, the grid is simulated as a qutrit.
+        See static_dephasing_experiment.
+        lam (float): The |1⟩–|2⟩ coupling ratio for the qutrit.
 
     Returns:
         A dictionary with keys:
@@ -126,11 +150,14 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
         infidelity_matrix (array): An array for the gate infidelity.
         Each column provides the infidelity of a static dephasing
         experiment under a fixed driving error.
+        leakage_matrix (array): Final leakage on the same grid,
+        only for a qutrit.
         }
     """
 
     EXPERIMENT_TITLE = ('static additive dephasing and multiplicative '
                         'driving field experiment')
+    qutrit = tg_alpha is not None
 
     if max_points is None:
         max_points = settings.options['MAX_POINTS']
@@ -139,6 +166,7 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
                                   max_points)
 
     infidelity_matrix = np.zeros([max_points, max_points])
+    leakage_matrix = np.zeros([max_points, max_points])
     omega_no_error = np.copy(control_dict['omega'])
 
     print(EXPERIMENT_TITLE.capitalize())
@@ -155,9 +183,13 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
         dephasing_sim = static_dephasing_experiment(scaled_dict,
                                                     u_target,
                                                     max_points,
-                                                    progbar_depth=1)
+                                                    progbar_depth=1,
+                                                    tg_alpha=tg_alpha,
+                                                    lam=lam)
 
         infidelity_matrix[:, pulse_idx] = dephasing_sim['infidelity']
+        if qutrit:
+            leakage_matrix[:, pulse_idx] = dephasing_sim['leakage']
 
     sim_dict = {}
 
@@ -166,6 +198,10 @@ def simult_source_experiment(control_dict, u_target, max_points=None):
     sim_dict['epsilon'] = pulse_error_vec
     sim_dict['tg_delta_z'] = dephasing_sim['tg_delta_z']
     sim_dict['infidelity_matrix'] = infidelity_matrix
+
+    if qutrit:
+        sim_dict['leakage_matrix'] = leakage_matrix
+        sim_dict['tg_alpha'] = tg_alpha
 
     return sim_dict
 
@@ -375,26 +411,9 @@ def _qutrit_dephasing_sweep(control_dict, u_target, tg_alpha, lam, max_points):
     the Stark-shifted qubit rotation both contribute.
     """
 
-    if max_points is None:
-        max_points = settings.options['MAX_POINTS']
-
-    gate_time = np.asarray(control_dict['times'], dtype=float)[-1]
-    delta_z_vec = np.logspace(*settings.options['DELTA_Z_INTERVAL'],
-                              max_points) / gate_time
-    delta_no_error = np.asarray(control_dict['delta'], dtype=float)
-    infidelity = np.zeros(max_points)
-    leakage = np.zeros(max_points)
-
-    for index, delta_z in enumerate(delta_z_vec):
-        noisy = _control_dict_with(
-            control_dict,
-            delta=delta_no_error + delta_z)
-        simulated = simulator.simulate_qutrit(noisy, u_target, tg_alpha,
-                                              lam=lam)
-        infidelity[index] = simulated['subspace_infidelity']
-        leakage[index] = simulated['leakage']
-
-    return gate_time * delta_z_vec, infidelity, leakage
+    sweep = static_dephasing_experiment(control_dict, u_target, max_points,
+                                        tg_alpha=tg_alpha, lam=lam)
+    return sweep['tg_delta_z'], sweep['infidelity'], sweep['leakage']
 
 
 def drag_dephasing_comparison(control_dict, u_target, tg_alpha, *,

@@ -245,6 +245,53 @@ def load_control_dict(filename):
     return loaded_dict
 
 
+def concatenate_control_dicts(*control_dicts):
+
+    """
+    Places pulses back to back in a single control dictionary.
+
+    Each pulse keeps its own fields, including its phase starting from its
+    own initial value, so the sequence implements the product of the
+    individual gates (the last pulse acts last). The time grid of each pulse
+    is shifted to start where the previous one ended, and the duplicated
+    junction sample is dropped.
+
+    The simulators normalize by times[-1], so a sequence of two unit-length
+    pulses keeps tg_alpha as T_g α of a single pulse, while the static
+    dephasing experiments report tg_delta_z for the total duration.
+
+    Returns:
+        A dictionary with times and the fields in FIELD_NAMES, and
+        pulse_boundaries: the end time of each pulse.
+    """
+
+    if not control_dicts:
+        raise ValueError('At least one control dictionary is required.')
+
+    field_names = settings.options['FIELD_NAMES']
+    times_parts = []
+    field_parts = {field: [] for field in field_names}
+    boundaries = []
+    offset = 0.0
+
+    for index, control_dict in enumerate(control_dicts):
+        times = np.asarray(control_dict['times'], dtype=float)
+        times = times - times[0]
+        start = 0 if index == 0 else 1
+        times_parts.append(offset + times[start:])
+        for field in field_names:
+            values = np.asarray(control_dict[field], dtype=float)
+            field_parts[field].append(values[start:])
+        offset += times[-1]
+        boundaries.append(offset)
+
+    concatenated = {'times': np.concatenate(times_parts)}
+    for field in field_names:
+        concatenated[field] = np.concatenate(field_parts[field])
+    concatenated['pulse_boundaries'] = np.array(boundaries)
+    return concatenated
+
+
 def make_dummy_dict(n_points):
 
     """
