@@ -4,6 +4,7 @@ This module provides helper functions to simulate the control fields.
 
 import qutip
 import numpy as np
+import scipy.integrate
 from qurveros.qubit_bench import quantumtools
 from qurveros.settings import settings
 
@@ -161,9 +162,9 @@ def simulate_qutrit(control_dict, u_target, tg_alpha, lam=None):
         lam = settings.options['DRAG_LAMBDA']
 
     propagators = _qutrit_propagator(control_dict, tg_alpha, lam)
-    leakage_trace = np.array([
-        quantumtools.calculate_leakage(step) for step in propagators
-    ])
+    unitaries = np.array([step.full() for step in propagators])
+    population_2 = np.abs(unitaries[:, 2, :2]) ** 2
+    leakage_trace = 0.5 * np.sum(population_2, axis=1)
     final = propagators[-1]
     from_0, from_1, leakage = quantumtools.leakage_components(final)
     block = quantumtools.qubit_subspace(final)
@@ -175,7 +176,87 @@ def simulate_qutrit(control_dict, u_target, tg_alpha, lam=None):
         'leakage_from_0': from_0,
         'leakage_from_1': from_1,
         'peak_leakage': float(np.max(leakage_trace)),
+        'leakage_trace': leakage_trace,
+        'population_2_from_0': population_2[:, 0],
+        'population_2_from_1': population_2[:, 1],
+        'times': np.asarray(control_dict['times'], dtype=float),
         'subspace_fidelity': fidelity,
         'subspace_infidelity': 1.0 - fidelity,
         'subspace_phase': quantumtools.subspace_phase(block, u_target),
+    }
+
+
+def qubit_propagators(control_dict):
+
+    """
+    The two-level propagator U(s) at every sample, as an (n, 2, 2) array.
+    """
+
+    return np.array([step.full() for step in _single_qubit_sim(control_dict)])
+
+
+def _toggling_components(unitaries, operator):
+
+    """
+    Components n_l(s) = Tr(σ_l U(s)† A(s) U(s)) / 2 for a Hermitian A.
+
+    operator has shape (n, 2, 2), or (2, 2) when it is constant.
+    """
+
+    paulis = np.array([qutip.sigmax().full(), qutip.sigmay().full(),
+                       qutip.sigmaz().full()])
+    operator = np.broadcast_to(operator, unitaries.shape)
+    rotated = np.einsum('nji,njk,nkl->nil', unitaries.conj(), operator,
+                        unitaries)
+    return 0.5 * np.einsum('lij,nji->nl', paulis, rotated).real
+
+
+def first_order_error_vectors(control_dict):
+
+    r"""
+    First-order sensitivity of a two-level pulse to static noise.
+
+    In the toggling frame of the ideal evolution, a static dephasing
+    $\frac{\delta_z}{2}\sigma_z$ and a multiplicative drive error
+    $\varepsilon$ generate, to first order, the rotations
+    $(T_g\delta_z)\,\vec r_z\cdot\vec\sigma/2$ and
+    $\varepsilon\,\vec r_\varepsilon\cdot\vec\sigma/2$ with
+
+        r_z = ∫ adj(U)† ẑ ds,
+        r_ε = ∫ T_g Ω adj(U)† (cos Φ, sin Φ, 0) ds,
+
+    over normalized time s in [0, 1]. T_g is times[-1], so the dephasing
+    axis matches tg_delta_z of the static dephasing experiment. The average
+    gate infidelity is then approximately (T_g δ_z)² |r_z|² / 6 and
+    ε² |r_ε|² / 6. For a curve-derived pulse, |r_z| is the closure
+    |closed_test| and |r_ε| is the tantrix area of the space curve.
+
+    Returns:
+        A dictionary with keys r_z and r_epsilon (3-vectors), their norms
+        r_z_norm and r_epsilon_norm, and the running integrals r_z_trace
+        and r_epsilon_trace with shape (n, 3).
+    """
+
+    tlist, x_control, y_control, _ = _time_and_drive(control_dict)
+    unitaries = qubit_propagators(control_dict)
+
+    sigma_z = qutip.sigmaz().full()
+    drive = (x_control[:, None, None] * qutip.sigmax().full()
+             + y_control[:, None, None] * qutip.sigmay().full())
+
+    z_integrand = _toggling_components(unitaries, sigma_z)
+    eps_integrand = _toggling_components(unitaries, drive)
+
+    r_z_trace = scipy.integrate.cumulative_trapezoid(
+        z_integrand, tlist, axis=0, initial=0)
+    r_eps_trace = scipy.integrate.cumulative_trapezoid(
+        eps_integrand, tlist, axis=0, initial=0)
+
+    return {
+        'r_z': r_z_trace[-1],
+        'r_epsilon': r_eps_trace[-1],
+        'r_z_norm': float(np.linalg.norm(r_z_trace[-1])),
+        'r_epsilon_norm': float(np.linalg.norm(r_eps_trace[-1])),
+        'r_z_trace': r_z_trace,
+        'r_epsilon_trace': r_eps_trace,
     }

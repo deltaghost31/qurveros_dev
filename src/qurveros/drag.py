@@ -32,6 +32,7 @@ pulse unchanged.
 """
 
 import numpy as np
+import scipy.integrate
 import scipy.interpolate
 
 from qurveros.settings import settings
@@ -192,3 +193,58 @@ def estimate_leakage(control_dict, tg_alpha, lam=None):
     amplitude = np.trapezoid(envelope * np.exp(1j * tg_alpha * normalized),
                              normalized)
     return float((lam ** 2 / 4.0) * np.abs(amplitude) ** 2)
+
+
+def first_order_leakage(control_dict, tg_alpha, lam=None):
+
+    r"""
+    Leakage to |2⟩ to first order in the |1⟩–|2⟩ coupling.
+
+    The qubit block evolves exactly under U_q(s) from the two-level
+    simulator, and |2⟩ accumulates the phase
+    θ_2(s) = ∫ T_g (α - 3Δ/2) ds of the qutrit Hamiltonian. The amplitude
+    to leak from |j⟩ is
+
+        A_j(s) = -i (λ/2) ∫_0^s T_g ε(s') e^{i θ_2(s')} ⟨1|U_q(s')|j⟩ ds',
+
+    with T_g = times[-1], so tg_alpha keeps the meaning it has in
+    simulate_qutrit. The Stark shift that the same coupling puts on |1⟩ is
+    second order and is left out. The transient (peak) leakage is therefore
+    reliable, but when the final leakage is a small remainder of a much
+    larger transient it can differ from simulate_qutrit by a factor of a few.
+
+    Returns:
+        A dictionary with leakage, leakage_from_0, leakage_from_1 at the end
+        of the pulse, leakage_trace (the average over |0⟩ and |1⟩ at every
+        sample), and times.
+    """
+
+    from qurveros.qubit_bench import simulator
+
+    if lam is None:
+        lam = settings.options['DRAG_LAMBDA']
+
+    times = np.asarray(control_dict['times'], dtype=float)
+    gate_time = times[-1]
+    tlist = times / gate_time
+    envelope, _ = complex_envelope(control_dict)
+    delta = np.asarray(control_dict['delta'], dtype=float)
+
+    level_2_energy = gate_time * (tg_alpha - 1.5 * delta)
+    theta_2 = scipy.integrate.cumulative_trapezoid(
+        level_2_energy, tlist, initial=0)
+
+    unitaries = simulator.qubit_propagators(control_dict)
+    coupling = (gate_time * (lam / 2.0) * envelope
+                * np.exp(1j * theta_2))[:, None] * unitaries[:, 1, :]
+    amplitudes = -1j * scipy.integrate.cumulative_trapezoid(
+        coupling, tlist, axis=0, initial=0)
+
+    population = np.abs(amplitudes) ** 2
+    return {
+        'leakage': float(0.5 * np.sum(population[-1])),
+        'leakage_from_0': float(population[-1, 0]),
+        'leakage_from_1': float(population[-1, 1]),
+        'leakage_trace': 0.5 * np.sum(population, axis=1),
+        'times': times,
+    }
