@@ -9,6 +9,7 @@ import logging
 from qurveros.misctools import progbar_range
 from qurveros.settings import settings
 from qurveros.qubit_bench import simulator, noisetools
+from qurveros import drag
 
 
 def _control_dict_with(control_dict, **field_updates):
@@ -291,3 +292,143 @@ def td_dephasing_experiment(control_dict, u_target, alpha, rng,
     sim_dict['alpha'] = alpha
 
     return sim_dict
+
+
+def _drag_betas(betas):
+
+    if betas is None:
+        n_betas = settings.options['DRAG_BETA_POINTS']
+        return np.linspace(0.0, 2.0, n_betas)
+    return np.asarray(betas, dtype=float)
+
+
+def drag_order_experiment(control_dict, u_target, tg_alpha, *,
+                          orders=(0, 1, 2), betas=None, lam=None):
+
+    """
+    Compares DRAG orders on one pulse.
+
+    For every order and every beta, the pulse is corrected and simulated as
+    a qutrit. beta scales the theoretical DRAG terms. Order 0 ignores beta
+    and is repeated on each column so the arrays stay rectangular.
+
+    Returns:
+        orders, betas: the axes of the scan.
+        leakage, peak_leakage, subspace_infidelity, subspace_phase:
+            arrays with shape (n_orders, n_betas).
+        leakage_estimate: the same shape, from the Fourier proxy in drag.py.
+        tg_alpha, lam: the values used.
+    """
+
+    if lam is None:
+        lam = settings.options['DRAG_LAMBDA']
+
+    orders = np.asarray(tuple(orders), dtype=int)
+    betas = _drag_betas(betas)
+    shape = (len(orders), len(betas))
+
+    leakage = np.zeros(shape)
+    peak_leakage = np.zeros(shape)
+    subspace_infidelity = np.zeros(shape)
+    subspace_phase = np.zeros(shape)
+    leakage_estimate = np.zeros(shape)
+
+    print('DRAG order comparison')
+
+    for order_idx, order in enumerate(orders):
+        for beta_idx in progbar_range(len(betas), title=f'DRAG order {order}'):
+
+            beta_value = float(betas[beta_idx])
+            corrected = drag.apply_drag(control_dict, tg_alpha,
+                                        order=int(order), beta=beta_value,
+                                        lam=lam)
+            simulated = simulator.simulate_qutrit(corrected, u_target,
+                                                  tg_alpha, lam=lam)
+            leakage[order_idx, beta_idx] = simulated['leakage']
+            peak_leakage[order_idx, beta_idx] = simulated['peak_leakage']
+            subspace_infidelity[order_idx, beta_idx] = \
+                simulated['subspace_infidelity']
+            subspace_phase[order_idx, beta_idx] = simulated['subspace_phase']
+            leakage_estimate[order_idx, beta_idx] = drag.estimate_leakage(
+                corrected, tg_alpha, lam=lam)
+
+    return {
+        'experiment': 'DRAG order comparison',
+        'orders': orders,
+        'betas': betas,
+        'leakage': leakage,
+        'peak_leakage': peak_leakage,
+        'subspace_infidelity': subspace_infidelity,
+        'subspace_phase': subspace_phase,
+        'leakage_estimate': leakage_estimate,
+        'tg_alpha': tg_alpha,
+        'lam': lam,
+    }
+
+
+def _qutrit_dephasing_sweep(control_dict, u_target, tg_alpha, lam, max_points):
+
+    """
+    Static dephasing of one pulse on the three-level simulator.
+
+    Infidelity is the subspace infidelity of the 2x2 block, so leakage and
+    the Stark-shifted qubit rotation both contribute.
+    """
+
+    if max_points is None:
+        max_points = settings.options['MAX_POINTS']
+
+    gate_time = np.asarray(control_dict['times'], dtype=float)[-1]
+    delta_z_vec = np.logspace(*settings.options['DELTA_Z_INTERVAL'],
+                              max_points) / gate_time
+    delta_no_error = np.asarray(control_dict['delta'], dtype=float)
+    infidelity = np.zeros(max_points)
+    leakage = np.zeros(max_points)
+
+    for index, delta_z in enumerate(delta_z_vec):
+        noisy = _control_dict_with(
+            control_dict,
+            delta=delta_no_error + delta_z)
+        simulated = simulator.simulate_qutrit(noisy, u_target, tg_alpha,
+                                              lam=lam)
+        infidelity[index] = simulated['subspace_infidelity']
+        leakage[index] = simulated['leakage']
+
+    return gate_time * delta_z_vec, infidelity, leakage
+
+
+def drag_dephasing_comparison(control_dict, u_target, tg_alpha, *,
+                              order=1, beta=1.0, lam=None, max_points=None):
+
+    """
+    Static dephasing of a pulse before and after DRAG, on the qutrit.
+
+    Both sweeps use simulate_qutrit. The subspace infidelity therefore
+    includes leakage and the detuning correction, which a two-level sweep
+    of the same pulses cannot see. A large |tg_alpha| makes the DRAG
+    correction small, so the two infidelity curves approach each other.
+    Very large |tg_alpha| also makes the qutrit diagonal stiff; keep the
+    value inside the range the ODE solver can integrate.
+    """
+
+    if lam is None:
+        lam = settings.options['DRAG_LAMBDA']
+
+    corrected = drag.apply_drag(control_dict, tg_alpha, order=order,
+                                beta=beta, lam=lam)
+    tg_delta_z, bare_infidelity, bare_leakage = _qutrit_dephasing_sweep(
+        control_dict, u_target, tg_alpha, lam, max_points)
+    _, drag_infidelity, drag_leakage = _qutrit_dephasing_sweep(
+        corrected, u_target, tg_alpha, lam, max_points)
+    return {
+        'experiment': 'qutrit static dephasing before and after DRAG',
+        'tg_alpha': tg_alpha,
+        'order': order,
+        'beta': beta,
+        'lam': lam,
+        'bare_infidelity': bare_infidelity,
+        'drag_infidelity': drag_infidelity,
+        'bare_leakage': bare_leakage,
+        'drag_leakage': drag_leakage,
+        'tg_delta_z': tg_delta_z,
+    }

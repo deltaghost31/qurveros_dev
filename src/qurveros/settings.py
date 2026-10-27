@@ -62,6 +62,11 @@ class Settings:
     # Control dictionary fields' entries names.
     options['FIELD_NAMES'] = ['omega', 'phi', 'delta']
 
+    # DRAG post-processing. DRAG_LAMBDA is the |1>-|2> coupling of a transmon.
+    # DRAG_BETA_POINTS is the default number of beta samples in a DRAG scan.
+    options['DRAG_LAMBDA'] = 2 ** 0.5
+    options['DRAG_BETA_POINTS'] = 9
+
     # Number of points to sample along the parameter interval for
     # optimization.
     options['OPT_POINTS'] = 4096

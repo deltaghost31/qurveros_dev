@@ -205,3 +205,34 @@ def plot_noise_contour(sim_dict, levels=None, ax=None):
         ax.locator_params(axis='x', nbins=7)
 
     return contour_set
+
+
+def plot_drag_scan(sim_dict, ax=None):
+
+    """
+    Plots final leakage against the DRAG scale beta, with one line per order.
+
+    Args:
+        sim_dict (dict): The dictionary returned by drag_order_experiment.
+        ax (matplotlib.axes.Axes): Axes to draw on. A new figure is created
+            when this is omitted.
+
+    Returns:
+        The axes used for the plot.
+    """
+
+    if ax is None:
+        _, ax = plt.subplots(1, layout='constrained')
+
+    colors = settings.options['FIELD_COLORS']
+    for index, order in enumerate(sim_dict['orders']):
+        ax.plot(sim_dict['betas'],
+                sim_dict['leakage'][index],
+                color=colors[index % len(colors)],
+                label=f'order {int(order)}')
+
+    ax.set_xlabel(r'DRAG scale $\beta$')
+    ax.set_ylabel('Final leakage')
+    ax.set_yscale('log')
+    ax.legend()
+    return ax
